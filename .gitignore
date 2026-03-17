@@ -1,0 +1,42 @@
+# Virtual environment
+venv/
+.venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Environment / secrets
+.env
+.env.*
+*.key
+*.pem
+
+# OS / editor
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Project data
+data/uploads/
+data/transcripts/
+data/temp/
+data/dataset/
+logs/
+models/
+
+# Optional generated outputs
+*.zip
+*.wav
+*.mp3
+*.mp4
+*.mkv
+*.avi
+*.mov
+*.flac
+*.ogg
+*.opus
+*.aac
+*.wma

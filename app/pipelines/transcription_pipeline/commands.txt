@@ -1,0 +1,5 @@
+4060:
+python app/pipelines/transcription_pipeline/transcriber_engine.py .\data\uploads\audio --device cuda --model large-v3 --compute_type float16 --batch_size 8 --beam_size 2 --vad --local_only
+
+3080:
+python app/pipelines/transcription_pipeline/transcriber_engine.py .\data\uploads\audio --device cuda --model large-v3 --compute_type float16 --batch_size 16 --beam_size 2 --vad --local_only
