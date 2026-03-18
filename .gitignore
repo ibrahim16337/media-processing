@@ -20,6 +20,7 @@ __pycache__/
 Thumbs.db
 
 # Project data
+data
 data/uploads/
 data/transcripts/
 data/temp/

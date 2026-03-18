@@ -8,12 +8,37 @@ from pathlib import Path
 from faster_whisper import WhisperModel
 from faster_whisper import BatchedInferencePipeline
 
-os.add_dll_directory(r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin")
+# --------------------------------------------------
+# Windows / Unicode-safe stdout-stderr
+# --------------------------------------------------
+
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
+try:
+    os.add_dll_directory(r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin")
+except Exception:
+    pass
 
 AUDIO_EXTS = {".mp3", ".wav", ".m4a", ".flac", ".ogg", ".opus", ".aac", ".wma"}
 
 # Queue for producer → consumer pipeline
 job_queue = Queue(maxsize=8)
+
+
+def safe_text(value):
+    """
+    Make sure filenames / labels never crash print() on Windows.
+    """
+    text = str(value)
+    try:
+        text.encode(sys.stdout.encoding or "utf-8", errors="strict")
+        return text
+    except Exception:
+        return text.encode("utf-8", errors="replace").decode("utf-8")
 
 
 def atomic_write_text(path: Path, text: str):
@@ -23,7 +48,6 @@ def atomic_write_text(path: Path, text: str):
 
 
 def format_hms(seconds: float):
-
     seconds = max(0.0, float(seconds))
 
     h = int(seconds // 3600)
@@ -37,12 +61,10 @@ def format_hms(seconds: float):
 
 
 def collect_audio_files(p: Path, recursive: bool):
-
     if p.is_file() and p.suffix.lower() in AUDIO_EXTS:
         return [p]
 
     if p.is_dir():
-
         it = p.rglob("*") if recursive else p.glob("*")
 
         return sorted(
@@ -57,23 +79,19 @@ def collect_audio_files(p: Path, recursive: bool):
 
 
 def live_iter_segments(segments_iter, total_duration, label):
-
     seg_count = 0
     last_ui = 0
     t0 = time.time()
 
-    print(f"-> {label}")
+    print(f"-> {safe_text(label)}")
 
     for seg in segments_iter:
-
         seg_count += 1
 
         if total_duration and total_duration > 0:
-
             now = time.time()
 
             if now - last_ui >= 0.2:
-
                 pct = min(
                     100.0,
                     (float(seg.end) / float(total_duration)) * 100.0,
@@ -93,7 +111,6 @@ def live_iter_segments(segments_iter, total_duration, label):
         yield seg
 
     if total_duration:
-
         elapsed = time.time() - t0
 
         print(
@@ -112,7 +129,6 @@ def transcribe_with_pipeline(
     vad_min_silence_ms,
     chunk_length,
 ):
-
     segments_iter, info = pipeline.transcribe(
         str(audio_path),
         language=language,
@@ -136,11 +152,8 @@ def transcribe_with_pipeline(
 # -----------------------------------
 
 def producer(files):
-
     for f in files:
-
-        print(f"[CPU] preparing {f.name}")
-
+        print(f"[CPU] preparing {safe_text(f.name)}")
         job_queue.put(f)
 
     # signal completion
@@ -157,12 +170,10 @@ def consumer(
     args,
     total_files
 ):
-
     ok = 0
     index = 1
 
     while True:
-
         audio_file = job_queue.get()
 
         if audio_file is None:
@@ -171,9 +182,7 @@ def consumer(
         out_path = out_dir / f"{audio_file.stem}.txt"
 
         if out_path.exists() and not args.overwrite:
-
-            print(f"[{index}/{total_files}] ⏭️ {audio_file.name} exists")
-
+            print(f"[{index}/{total_files}] ⏭️ {safe_text(audio_file.name)} exists")
             ok += 1
             index += 1
             continue
@@ -181,7 +190,6 @@ def consumer(
         print(f"[{index}/{total_files}]")
 
         try:
-
             segments_iter, info = transcribe_with_pipeline(
                 batched,
                 audio_file,
@@ -198,7 +206,7 @@ def consumer(
             parts = []
 
             for seg in live_iter_segments(
-                segments_iter, total, audio_file.name
+                segments_iter, total, safe_text(audio_file.name)
             ):
                 parts.append(seg.text or "")
 
@@ -212,19 +220,17 @@ def consumer(
 
             atomic_write_text(out_path, final_text)
 
-            print(f"✅ saved: {out_path.name}\n")
+            print(f"✅ saved: {safe_text(out_path.name)}\n")
 
             ok += 1
             index += 1
 
         except Exception as e:
-
-            print(f"❌ {audio_file.name}: {e}")
+            print(f"❌ {safe_text(audio_file.name)}: {e}")
             sys.exit(1)
 
 
 def main():
-
     ap = argparse.ArgumentParser(description="GPU-only Urdu transcription")
 
     ap.add_argument("input")
@@ -254,8 +260,8 @@ def main():
 
     if args.vad:
         try:
-            import onnxruntime
-        except:
+            import onnxruntime  # noqa: F401
+        except Exception:
             print("Install: pip install onnxruntime")
             sys.exit(1)
 
@@ -291,7 +297,6 @@ def main():
 
     start = time.time()
 
-    # Start producer and consumer threads
     producer_thread = threading.Thread(target=producer, args=(files,))
     consumer_thread = threading.Thread(
         target=consumer,

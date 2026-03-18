@@ -1,8 +1,7 @@
 import subprocess
 from pathlib import Path
+from app.config.paths import FFMPEG_EXE
 
-# CHANGE THIS PATH IF YOUR FFMPEG LOCATION IS DIFFERENT
-FFMPEG_PATH = r"D:\tools\ffmpeg\bin\ffmpeg.exe"
 
 def standardize_audio(input_file: Path, output_dir: Path):
     """
@@ -13,9 +12,10 @@ def standardize_audio(input_file: Path, output_dir: Path):
         Mono
     """
     output_file = output_dir / f"{input_file.stem}.wav"
+
     cmd = [
-        FFMPEG_PATH,
-        "-y",   
+        str(FFMPEG_EXE),
+        "-y",
         "-i",
         str(input_file),
         "-vn",
@@ -27,5 +27,6 @@ def standardize_audio(input_file: Path, output_dir: Path):
         "1",
         str(output_file),
     ]
+
     subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return output_file
