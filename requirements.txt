@@ -2,3 +2,4 @@ streamlit
 faster-whisper
 onnxruntime
 yt-dlp
+openpyxl

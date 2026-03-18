@@ -52,6 +52,7 @@ DATASET_DIR = DATA_DIR / "dataset"
 
 FFMPEG_DIR = Path(r"D:\tools\ffmpeg\bin")
 FFMPEG_EXE = FFMPEG_DIR / "ffmpeg.exe"
+FFPROBE_EXE = FFMPEG_DIR / "ffprobe.exe"
 
 
 def slugify(value: str) -> str:

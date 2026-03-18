@@ -24,6 +24,7 @@ from app.pipelines.media_pipeline.youtube_downloader import download_youtube_aud
 from app.pipelines.media_pipeline.audio_standardizer import standardize_audio
 from app.pipelines.transcription_pipeline.transcription_runner import build_transcription_cmd
 from app.pipelines.playlist_pipeline.playlist_runner import run_playlist_download
+from app.pipelines.playlist_pipeline.playlist_excel_exporter import generate_playlist_excel
 
 # --------------------------------------------------
 # Ensure required directories exist
@@ -735,7 +736,17 @@ with tab4:
                 if success:
                     st.success("Playlist transcription complete.")
                     st.write(f"Transcription time: **{transcription_time:.2f} sec**")
-
+                    excel_file = generate_playlist_excel(paths, manifest)
+                    if excel_file.exists():
+                        excel_bytes = excel_file.read_bytes()
+                        st.download_button(
+                            label="Download Playlist Excel File",
+                            data=excel_bytes,
+                            file_name=excel_file.name,
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            key=f"playlist_excel_{paths.root.name}"
+                        )
+                    
                     playlist_transcripts = sorted(paths.transcripts.glob("*.txt"))
 
                     if playlist_transcripts:
