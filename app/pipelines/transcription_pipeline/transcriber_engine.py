@@ -5,8 +5,8 @@ import argparse
 import threading
 from queue import Queue
 from pathlib import Path
-from faster_whisper import WhisperModel
-from faster_whisper import BatchedInferencePipeline
+
+from faster_whisper import WhisperModel, BatchedInferencePipeline
 
 # --------------------------------------------------
 # Windows / Unicode-safe stdout-stderr
@@ -66,7 +66,6 @@ def collect_audio_files(p: Path, recursive: bool):
 
     if p.is_dir():
         it = p.rglob("*") if recursive else p.glob("*")
-
         return sorted(
             [
                 f
@@ -119,29 +118,40 @@ def live_iter_segments(segments_iter, total_duration, label):
         )
 
 
-def transcribe_with_pipeline(
-    pipeline,
-    audio_path,
-    language,
-    beam_size,
-    batch_size,
-    vad_filter,
-    vad_min_silence_ms,
-    chunk_length,
-):
-    segments_iter, info = pipeline.transcribe(
+def build_transcribe_kwargs(args, language):
+    kwargs = {
+        "language": language,  # None = auto detection
+        "task": "transcribe",
+        "beam_size": args.beam_size,
+        "vad_filter": args.vad,
+        "vad_parameters": {
+            "min_silence_duration_ms": args.vad_min_silence_ms
+        } if args.vad else None,
+        "chunk_length": args.chunk_length,
+    }
+
+    if args.initial_prompt:
+        kwargs["initial_prompt"] = args.initial_prompt
+
+    if args.hotwords:
+        kwargs["hotwords"] = args.hotwords
+
+    if args.multilingual:
+        kwargs["multilingual"] = True
+
+    return kwargs
+
+
+def transcribe_audio(transcriber, audio_path, args):
+    selected_language = None if str(args.language).lower() == "auto" else args.language
+    kwargs = build_transcribe_kwargs(args, selected_language)
+
+    if args.decode_mode == "batched":
+        kwargs["batch_size"] = args.batch_size
+
+    segments_iter, info = transcriber.transcribe(
         str(audio_path),
-        language=language,
-        task="transcribe",
-        beam_size=beam_size,
-        batch_size=batch_size,
-        vad_filter=vad_filter,
-        vad_parameters={
-            "min_silence_duration_ms": vad_min_silence_ms
-        }
-        if vad_filter
-        else None,
-        chunk_length=chunk_length,
+        **kwargs,
     )
 
     return segments_iter, info
@@ -165,7 +175,7 @@ def producer(files):
 # -----------------------------------
 
 def consumer(
-    batched,
+    transcriber,
     out_dir,
     args,
     total_files
@@ -190,18 +200,24 @@ def consumer(
         print(f"[{index}/{total_files}]")
 
         try:
-            segments_iter, info = transcribe_with_pipeline(
-                batched,
+            segments_iter, info = transcribe_audio(
+                transcriber,
                 audio_file,
-                args.language,
-                args.beam_size,
-                args.batch_size,
-                args.vad,
-                args.vad_min_silence_ms,
-                args.chunk_length,
+                args,
             )
 
             total = getattr(info, "duration", None)
+            detected_language = getattr(info, "language", None)
+            detected_probability = getattr(info, "language_probability", None)
+
+            if detected_language:
+                if detected_probability is not None:
+                    print(
+                        f"Detected language: {detected_language} "
+                        f"(prob={detected_probability:.2f})"
+                    )
+                else:
+                    print(f"Detected language: {detected_language}")
 
             parts = []
 
@@ -212,9 +228,22 @@ def consumer(
 
             transcript_text = "".join(parts).strip()
 
+            header_parts = []
+
             if total:
                 duration_str = format_hms(total)
-                final_text = f"Audio Length: {duration_str}\n\n{transcript_text}"
+                header_parts.append(f"Audio Length: {duration_str}")
+
+            if detected_language:
+                if detected_probability is not None:
+                    header_parts.append(
+                        f"Detected Language: {detected_language} ({detected_probability:.2f})"
+                    )
+                else:
+                    header_parts.append(f"Detected Language: {detected_language}")
+
+            if header_parts:
+                final_text = "\n".join(header_parts) + "\n\n" + transcript_text
             else:
                 final_text = transcript_text
 
@@ -225,13 +254,24 @@ def consumer(
             ok += 1
             index += 1
 
+        except TypeError as e:
+            msg = str(e)
+            if "multilingual" in msg or "hotwords" in msg or "initial_prompt" in msg:
+                print("❌ Your installed faster-whisper version is too old for one of these arguments:")
+                print("   --multilingual / --hotwords / --initial_prompt")
+                print("Upgrade with: pip install -U faster-whisper")
+                sys.exit(1)
+            else:
+                print(f"❌ {safe_text(audio_file.name)}: {e}")
+                sys.exit(1)
+
         except Exception as e:
             print(f"❌ {safe_text(audio_file.name)}: {e}")
             sys.exit(1)
 
 
 def main():
-    ap = argparse.ArgumentParser(description="GPU-only Urdu transcription")
+    ap = argparse.ArgumentParser(description="GPU-only transcription")
 
     ap.add_argument("input")
     ap.add_argument("-o", "--output_dir", default="data/transcripts")
@@ -242,12 +282,44 @@ def main():
     ap.add_argument("--num_workers", type=int, default=4)
     ap.add_argument("--recursive", action="store_true")
     ap.add_argument("--overwrite", action="store_true")
-    ap.add_argument("--language", default="ur")
+
+    # Keep engine backward-safe. Runner can override these.
+    ap.add_argument(
+        "--language",
+        default="ur",
+        help="Language code like 'ur', 'en', or 'auto' for detection",
+    )
+
+    ap.add_argument(
+        "--multilingual",
+        action="store_true",
+        help="Enable mixed-language / per-segment language handling",
+    )
+
+    ap.add_argument(
+        "--decode_mode",
+        choices=["single", "batched"],
+        default="batched",
+        help="single = accuracy-first, batched = speed-first",
+    )
+
     ap.add_argument("--beam_size", type=int, default=2)
     ap.add_argument("--batch_size", type=int, default=8)
     ap.add_argument("--chunk_length", type=int, default=None)
     ap.add_argument("--vad", action="store_true")
     ap.add_argument("--vad_min_silence_ms", type=int, default=500)
+
+    ap.add_argument(
+        "--initial_prompt",
+        default="",
+        help="Prompt to guide transcription style and preserve foreign words",
+    )
+
+    ap.add_argument(
+        "--hotwords",
+        default="",
+        help="Comma or space separated hint phrases/words",
+    )
 
     ap.add_argument(
         "--cache_dir",
@@ -272,7 +344,7 @@ def main():
 
     model = WhisperModel(
         args.model,
-        device="cuda",
+        device=args.device,
         device_index=args.device_index,
         compute_type=args.compute_type,
         num_workers=args.num_workers,
@@ -280,10 +352,12 @@ def main():
         local_files_only=args.local_only,
     )
 
-    batched = BatchedInferencePipeline(model=model)
+    if args.decode_mode == "batched":
+        transcriber = BatchedInferencePipeline(model=model)
+    else:
+        transcriber = model
 
     inp = Path(args.input)
-
     files = collect_audio_files(inp, recursive=args.recursive)
 
     if not files:
@@ -291,6 +365,9 @@ def main():
         sys.exit(1)
 
     print(f"Found {len(files)} files")
+    print(f"Decode mode: {args.decode_mode}")
+    print(f"Language: {args.language}")
+    print(f"Multilingual: {args.multilingual}")
 
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -300,7 +377,7 @@ def main():
     producer_thread = threading.Thread(target=producer, args=(files,))
     consumer_thread = threading.Thread(
         target=consumer,
-        args=(batched, out_dir, args, len(files)),
+        args=(transcriber, out_dir, args, len(files)),
     )
 
     producer_thread.start()
@@ -310,7 +387,6 @@ def main():
     consumer_thread.join()
 
     elapsed = time.time() - start
-
     print(f"Done in {format_hms(elapsed)}")
 
 
