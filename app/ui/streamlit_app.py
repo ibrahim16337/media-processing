@@ -18,6 +18,9 @@ from app.config.paths import (
     UPLOAD_VIDEO_DIR,
     TRANSCRIPT_DIR,
     PLAYLISTS_DIR,
+    METADATA_OUTPUT_DIR,
+    METADATA_PLAYLIST_DIR,
+    METADATA_EXCEL_IMPORT_DIR,
 )
 from app.pipelines.media_pipeline.ingestion_runner import run_ingestion
 from app.pipelines.media_pipeline.youtube_downloader import download_youtube_audio
@@ -25,6 +28,21 @@ from app.pipelines.media_pipeline.audio_standardizer import standardize_audio
 from app.pipelines.transcription_pipeline.transcription_runner import build_transcription_cmd
 from app.pipelines.playlist_pipeline.playlist_runner import run_playlist_download
 from app.pipelines.playlist_pipeline.playlist_excel_exporter import generate_playlist_excel
+from app.pipelines.metadata_generation_pipeline.metadata_runner import run_metadata_generation
+from app.pipelines.metadata_generation_pipeline.ollama_client import (
+    DEFAULT_MODEL,
+    DEFAULT_BASE_URL,
+    DEFAULT_TIMEOUT,
+    DEFAULT_RETRIES,
+    DEFAULT_SLEEP_MS,
+    DEFAULT_TEMPERATURE,
+    DEFAULT_NUM_CTX,
+    DEFAULT_NUM_PREDICT,
+)
+from app.pipelines.metadata_generation_pipeline.transcript_sources import (
+    get_excel_sheet_names,
+    get_excel_columns,
+)
 
 # --------------------------------------------------
 # Ensure required directories exist
@@ -34,6 +52,9 @@ UPLOAD_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
 UPLOAD_VIDEO_DIR.mkdir(parents=True, exist_ok=True)
 TRANSCRIPT_DIR.mkdir(parents=True, exist_ok=True)
 PLAYLISTS_DIR.mkdir(parents=True, exist_ok=True)
+METADATA_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+METADATA_PLAYLIST_DIR.mkdir(parents=True, exist_ok=True)
+METADATA_EXCEL_IMPORT_DIR.mkdir(parents=True, exist_ok=True)
 
 # --------------------------------------------------
 # Session state
@@ -48,12 +69,16 @@ if "batch_notice" not in st.session_state:
 if "global_notice" not in st.session_state:
     st.session_state["global_notice"] = None
 
+if "metadata_last_result" not in st.session_state:
+    st.session_state["metadata_last_result"] = None
+
 # --------------------------------------------------
 # Constants
 # --------------------------------------------------
 
 AUDIO_EXTS = {".mp3", ".wav", ".m4a", ".flac", ".ogg", ".opus", ".aac", ".wma"}
 VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".avi", ".webm"}
+EXCEL_EXTS = {".xlsx", ".xlsm"}
 
 # --------------------------------------------------
 # Streamlit config
@@ -122,6 +147,17 @@ def save_uploaded_files(uploaded_files):
     return audio_count, video_count
 
 
+def save_uploaded_excel(uploaded_file):
+    upload_dir = METADATA_EXCEL_IMPORT_DIR / "uploaded_excels"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+
+    save_path = upload_dir / uploaded_file.name
+    with open(save_path, "wb") as f:
+        f.write(uploaded_file.getbuffer())
+
+    return save_path
+
+
 def clear_files_in_folder(folder: Path, allowed_exts=None):
     removed = 0
 
@@ -162,9 +198,9 @@ def clear_folder_contents(folder: Path):
 def clear_generated_project_data():
     removed_audio = clear_files_in_folder(UPLOAD_AUDIO_DIR, AUDIO_EXTS | {".webm"})
     removed_video = clear_files_in_folder(UPLOAD_VIDEO_DIR, VIDEO_EXTS)
-
     removed_transcripts = clear_files_in_folder(TRANSCRIPT_DIR, {".txt", ".zip", ".json"})
     playlist_files, playlist_dirs = clear_folder_contents(PLAYLISTS_DIR)
+    metadata_files, metadata_dirs = clear_folder_contents(METADATA_OUTPUT_DIR)
 
     return {
         "audio_files": removed_audio,
@@ -172,7 +208,21 @@ def clear_generated_project_data():
         "transcript_files": removed_transcripts,
         "playlist_files": playlist_files,
         "playlist_dirs": playlist_dirs,
+        "metadata_files": metadata_files,
+        "metadata_dirs": metadata_dirs,
     }
+
+
+def build_clear_summary_message(summary: dict):
+    return (
+        f"Cleared data: {summary['audio_files']} audio file(s), "
+        f"{summary['video_files']} video file(s), "
+        f"{summary['transcript_files']} transcript file(s), "
+        f"{summary['playlist_dirs']} playlist folder(s), "
+        f"{summary['playlist_files']} extra playlist file(s), "
+        f"{summary['metadata_dirs']} metadata folder(s), "
+        f"{summary['metadata_files']} metadata file(s)."
+    )
 
 
 def delete_playlist_folder_by_slug(slug: str):
@@ -220,6 +270,78 @@ def get_video_files(folder: Path):
             if f.is_file() and f.suffix.lower() in VIDEO_EXTS
         ]
     )
+
+
+def get_all_transcript_files():
+    files = []
+    files.extend(sorted(TRANSCRIPT_DIR.glob("*.txt")))
+    files.extend(sorted(PLAYLISTS_DIR.glob("*/transcripts/*.txt")))
+
+    unique = {}
+    for file_path in files:
+        unique[str(file_path.resolve())] = file_path
+
+    return sorted(unique.values(), key=lambda p: str(p).lower())
+
+
+def get_transcript_source_folders():
+    folders = []
+
+    if TRANSCRIPT_DIR.exists():
+        folders.append(TRANSCRIPT_DIR)
+
+    playlist_transcript_dirs = sorted(
+        [
+            p for p in PLAYLISTS_DIR.glob("*/transcripts")
+            if p.is_dir()
+        ],
+        key=lambda p: str(p).lower()
+    )
+    folders.extend(playlist_transcript_dirs)
+
+    unique = {}
+    for folder in folders:
+        unique[str(folder.resolve())] = folder
+
+    return sorted(unique.values(), key=lambda p: str(p).lower())
+
+
+def get_existing_excel_sources():
+    files = []
+    files.extend(sorted(PLAYLISTS_DIR.glob("*/metadata/*.xlsx")))
+    files.extend(sorted(PLAYLISTS_DIR.glob("*/metadata/*.xlsm")))
+
+    uploaded_excels_dir = METADATA_EXCEL_IMPORT_DIR / "uploaded_excels"
+    if uploaded_excels_dir.exists():
+        files.extend(sorted(uploaded_excels_dir.glob("*.xlsx")))
+        files.extend(sorted(uploaded_excels_dir.glob("*.xlsm")))
+
+    unique = {}
+    for file_path in files:
+        unique[str(file_path.resolve())] = file_path
+
+    return sorted(unique.values(), key=lambda p: str(p).lower())
+
+
+def format_path_for_display(path: Path):
+    try:
+        return str(path.relative_to(ROOT))
+    except Exception:
+        return str(path)
+
+
+def path_is_under(child: Path, parent: Path):
+    try:
+        child.resolve().relative_to(parent.resolve())
+        return True
+    except Exception:
+        return False
+
+
+def resolve_metadata_output_dir_for_source(source_path: Path):
+    if path_is_under(source_path, PLAYLISTS_DIR):
+        return METADATA_PLAYLIST_DIR
+    return None
 
 
 def read_text_file(path: Path):
@@ -304,11 +426,12 @@ def run_transcription_with_progress(input_path: Path, output_dir: Path):
 # Tabs
 # --------------------------------------------------
 
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "YouTube",
     "Upload & Batch Process",
     "Transcripts",
-    "Playlist Download & Transcription"
+    "Playlist Download & Transcription",
+    "Metadata / SEO Generation",
 ])
 
 # ==================================================
@@ -326,17 +449,9 @@ with tab1:
     with col_a:
         if st.button("Clear All Generated Project Data", key="tab1_clear_all_data"):
             summary = clear_generated_project_data()
-            set_global_notice(
-                "success",
-                (
-                    f"Cleared data: {summary['audio_files']} audio file(s), "
-                    f"{summary['video_files']} video file(s), "
-                    f"{summary['transcript_files']} transcript file(s), "
-                    f"{summary['playlist_dirs']} playlist folder(s), "
-                    f"{summary['playlist_files']} extra playlist file(s)."
-                ),
-            )
+            set_global_notice("success", build_clear_summary_message(summary))
             reset_batch_uploader()
+            st.session_state["metadata_last_result"] = None
             st.rerun()
 
     youtube_url = st.text_input("Paste YouTube Link", key="youtube_url")
@@ -466,17 +581,9 @@ with tab2:
     with row1_col4:
         if st.button("Clear All Generated Data", key="clear_batch_all_generated"):
             summary = clear_generated_project_data()
-            set_batch_notice(
-                "success",
-                (
-                    f"Cleared data: {summary['audio_files']} audio file(s), "
-                    f"{summary['video_files']} video file(s), "
-                    f"{summary['transcript_files']} transcript file(s), "
-                    f"{summary['playlist_dirs']} playlist folder(s), "
-                    f"{summary['playlist_files']} extra playlist file(s)."
-                ),
-            )
+            set_batch_notice("success", build_clear_summary_message(summary))
             reset_batch_uploader()
+            st.session_state["metadata_last_result"] = None
             st.rerun()
 
     uploaded_files = st.file_uploader(
@@ -567,17 +674,9 @@ with tab3:
     with tab3_col2:
         if st.button("Clear All Generated Project Data", key="tab3_clear_all_data"):
             summary = clear_generated_project_data()
-            set_global_notice(
-                "success",
-                (
-                    f"Cleared data: {summary['audio_files']} audio file(s), "
-                    f"{summary['video_files']} video file(s), "
-                    f"{summary['transcript_files']} transcript file(s), "
-                    f"{summary['playlist_dirs']} playlist folder(s), "
-                    f"{summary['playlist_files']} extra playlist file(s)."
-                ),
-            )
+            set_global_notice("success", build_clear_summary_message(summary))
             reset_batch_uploader()
+            st.session_state["metadata_last_result"] = None
             st.rerun()
 
     transcripts = sorted(TRANSCRIPT_DIR.glob("*.txt"))
@@ -638,17 +737,9 @@ with tab4:
     with manage_col2:
         if st.button("Clear All Generated Project Data", key="tab4_clear_all_data"):
             summary = clear_generated_project_data()
-            set_global_notice(
-                "success",
-                (
-                    f"Cleared data: {summary['audio_files']} audio file(s), "
-                    f"{summary['video_files']} video file(s), "
-                    f"{summary['transcript_files']} transcript file(s), "
-                    f"{summary['playlist_dirs']} playlist folder(s), "
-                    f"{summary['playlist_files']} extra playlist file(s)."
-                ),
-            )
+            set_global_notice("success", build_clear_summary_message(summary))
             reset_batch_uploader()
+            st.session_state["metadata_last_result"] = None
             st.rerun()
 
     playlist_slug_to_clear = st.text_input(
@@ -736,6 +827,7 @@ with tab4:
                 if success:
                     st.success("Playlist transcription complete.")
                     st.write(f"Transcription time: **{transcription_time:.2f} sec**")
+
                     excel_file = generate_playlist_excel(paths, manifest)
                     if excel_file.exists():
                         excel_bytes = excel_file.read_bytes()
@@ -746,7 +838,7 @@ with tab4:
                             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                             key=f"playlist_excel_{paths.root.name}"
                         )
-                    
+
                     playlist_transcripts = sorted(paths.transcripts.glob("*.txt"))
 
                     if playlist_transcripts:
@@ -785,3 +877,282 @@ with tab4:
 
             except Exception as e:
                 st.error(f"Error: {e}")
+
+# ==================================================
+# TAB 5 — METADATA / SEO GENERATION
+# ==================================================
+
+with tab5:
+    st.header("Metadata / SEO Generation")
+    st.write("Generate title, description, tags, and hashtags from transcript text using Ollama.")
+
+    metadata_manage_col1, metadata_manage_col2 = st.columns(2)
+
+    with metadata_manage_col1:
+        if st.button("Clear All Metadata Outputs", key="clear_all_metadata_outputs"):
+            removed_files, removed_dirs = clear_folder_contents(METADATA_OUTPUT_DIR)
+            st.session_state["metadata_last_result"] = None
+            st.success(f"Removed {removed_dirs} metadata folder(s) and {removed_files} metadata file(s).")
+            st.rerun()
+
+    with metadata_manage_col2:
+        if st.button("Clear All Generated Project Data", key="tab5_clear_all_data"):
+            summary = clear_generated_project_data()
+            st.session_state["metadata_last_result"] = None
+            st.success(build_clear_summary_message(summary))
+            reset_batch_uploader()
+            st.rerun()
+
+    source_mode = st.radio(
+        "Choose Source Type",
+        ["Single Transcript File", "Transcript Folder", "Excel File"],
+        horizontal=True,
+        key="metadata_source_mode"
+    )
+
+    selected_source_type = None
+    selected_source_path = None
+    selected_transcript_column = None
+    selected_filename_column = None
+    selected_sheet_name = None
+
+    if source_mode == "Single Transcript File":
+        transcript_files = get_all_transcript_files()
+
+        if not transcript_files:
+            st.info("No transcript files found in global transcripts or playlist transcript folders.")
+        else:
+            selected_file = st.selectbox(
+                "Select Transcript File",
+                options=transcript_files,
+                format_func=format_path_for_display,
+                key="metadata_single_file_select"
+            )
+            selected_source_type = "single_file"
+            selected_source_path = selected_file
+
+    elif source_mode == "Transcript Folder":
+        transcript_folders = get_transcript_source_folders()
+
+        if not transcript_folders:
+            st.info("No transcript folders found.")
+        else:
+            folder_options = [str(p) for p in transcript_folders]
+
+            selected_folder_str = st.selectbox(
+                "Select Transcript Folder",
+                options=folder_options,
+                format_func=lambda p: format_path_for_display(Path(p)),
+                key="metadata_folder_select"
+            )
+
+            selected_folder_path = Path(selected_folder_str)
+            selected_source_type = "folder"
+            selected_source_path = selected_folder_path
+        
+            txt_count = len(list(selected_folder_path.glob("*.txt")))
+            st.write(f"Transcript files found in selected folder: **{txt_count}**")
+            
+
+    elif source_mode == "Excel File":
+        excel_input_mode = st.radio(
+            "Excel Source",
+            ["Existing Generated Excel File", "Upload Excel File"],
+            horizontal=True,
+            key="metadata_excel_source_mode"
+        )
+
+        selected_excel_path = None
+
+        if excel_input_mode == "Existing Generated Excel File":
+            excel_files = get_existing_excel_sources()
+
+            if not excel_files:
+                st.info("No Excel files found. Generate a playlist Excel first or upload one below.")
+            else:
+                selected_excel_path = st.selectbox(
+                    "Select Excel File",
+                    options=excel_files,
+                    format_func=format_path_for_display,
+                    key="metadata_existing_excel_select"
+                )
+
+        else:
+            uploaded_excel = st.file_uploader(
+                "Upload Excel File",
+                type=["xlsx", "xlsm"],
+                key="metadata_excel_uploader"
+            )
+
+            if uploaded_excel is not None:
+                selected_excel_path = save_uploaded_excel(uploaded_excel)
+                st.success(f"Uploaded Excel saved: {selected_excel_path.name}")
+
+        if selected_excel_path:
+            try:
+                sheet_names = get_excel_sheet_names(selected_excel_path)
+
+                if not sheet_names:
+                    st.warning("No sheets found in the selected Excel file.")
+                else:
+                    selected_sheet_name = st.selectbox(
+                        "Select Sheet",
+                        options=sheet_names,
+                        key="metadata_excel_sheet_select"
+                    )
+
+                    columns = get_excel_columns(selected_excel_path, selected_sheet_name)
+
+                    if not columns:
+                        st.warning("No columns found in the selected sheet.")
+                    else:
+                        transcript_default_index = 0
+                        lower_columns = [c.strip().lower() for c in columns]
+                        if "transcription" in lower_columns:
+                            transcript_default_index = lower_columns.index("transcription")
+
+                        selected_transcript_column = st.selectbox(
+                            "Transcript Column",
+                            options=columns,
+                            index=transcript_default_index,
+                            key="metadata_transcript_column_select"
+                        )
+
+                        filename_options = ["(auto-generate row names)"] + columns
+                        filename_default_index = 0
+                        if "title" in lower_columns:
+                            filename_default_index = lower_columns.index("title") + 1
+
+                        filename_choice = st.selectbox(
+                            "Filename Column (optional)",
+                            options=filename_options,
+                            index=filename_default_index,
+                            key="metadata_filename_column_select"
+                        )
+
+                        if filename_choice != "(auto-generate row names)":
+                            selected_filename_column = filename_choice
+                        else:
+                            selected_filename_column = None
+
+                        selected_source_type = "excel"
+                        selected_source_path = selected_excel_path
+
+            except Exception as e:
+                st.error(f"Failed to inspect Excel file: {e}")
+
+    output_name = st.text_input(
+        "Output Name (optional)",
+        value="",
+        placeholder="e.g. seo-metadata",
+        key="metadata_output_name"
+    )
+
+    with st.expander("LLM Settings", expanded=False):
+        llm_col1, llm_col2 = st.columns(2)
+
+        with llm_col1:
+            model = st.text_input("Ollama Model", value=DEFAULT_MODEL, key="metadata_model")
+            base_url = st.text_input("Base URL", value=DEFAULT_BASE_URL, key="metadata_base_url")
+            timeout = st.number_input("Timeout (sec)", min_value=1, value=DEFAULT_TIMEOUT, step=1, key="metadata_timeout")
+            retries = st.number_input("Retries", min_value=0, value=DEFAULT_RETRIES, step=1, key="metadata_retries")
+
+        with llm_col2:
+            sleep_ms = st.number_input("Sleep Between Items (ms)", min_value=0, value=DEFAULT_SLEEP_MS, step=50, key="metadata_sleep_ms")
+            temperature = st.number_input("Temperature", min_value=0.0, max_value=2.0, value=float(DEFAULT_TEMPERATURE), step=0.1, key="metadata_temperature")
+            num_ctx = st.number_input("Context Window", min_value=256, value=DEFAULT_NUM_CTX, step=256, key="metadata_num_ctx")
+            num_predict = st.number_input("Max Output Tokens", min_value=64, value=DEFAULT_NUM_PREDICT, step=64, key="metadata_num_predict")
+
+        seed_text = st.text_input("Seed (optional)", value="", key="metadata_seed")
+
+    if st.button("Generate Metadata Excel", key="generate_metadata_button"):
+        if selected_source_type is None or selected_source_path is None:
+            st.warning("Please select a valid input source first.")
+        else:
+            try:
+                seed_value = None
+                if seed_text.strip():
+                    seed_value = int(seed_text.strip())
+
+                custom_output_dir = resolve_metadata_output_dir_for_source(Path(selected_source_path))
+
+                with st.spinner("Generating metadata... this may take some time depending on the number of transcripts and your Ollama model."):
+                    result = run_metadata_generation(
+                        source_type=selected_source_type,
+                        source_path=selected_source_path,
+                        transcript_column=selected_transcript_column,
+                        filename_column=selected_filename_column,
+                        sheet_name=selected_sheet_name,
+                        output_name=output_name.strip() or None,
+                        output_dir=custom_output_dir,
+                        model=model.strip() or DEFAULT_MODEL,
+                        base_url=base_url.strip() or DEFAULT_BASE_URL,
+                        timeout=int(timeout),
+                        retries=int(retries),
+                        sleep_ms=int(sleep_ms),
+                        temperature=float(temperature),
+                        num_ctx=int(num_ctx),
+                        num_predict=int(num_predict),
+                        seed=seed_value,
+                    )
+
+                st.session_state["metadata_last_result"] = result
+                st.success("Metadata generation completed.")
+
+            except Exception as e:
+                st.error(f"Metadata generation failed: {e}")
+
+    last_result = st.session_state.get("metadata_last_result")
+
+    if last_result:
+        st.subheader("Last Metadata Run")
+
+        st.write(f"Source type: **{last_result.get('source_type', '')}**")
+        st.write(f"Total items: **{last_result.get('total_items', 0)}**")
+        st.write(f"Successful items: **{last_result.get('success_count', 0)}**")
+        st.write(f"Items with errors: **{last_result.get('error_count', 0)}**")
+        st.write(f"Run folder: `{last_result.get('run_dir', '')}`")
+
+        excel_output_path = Path(last_result.get("excel_output", ""))
+        ok_log_path = Path(last_result.get("ok_log", ""))
+        err_log_path = Path(last_result.get("err_log", ""))
+
+        download_col1, download_col2, download_col3 = st.columns(3)
+
+        with download_col1:
+            if excel_output_path.exists():
+                st.download_button(
+                    label="Download Metadata Excel",
+                    data=excel_output_path.read_bytes(),
+                    file_name=excel_output_path.name,
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="download_metadata_excel"
+                )
+
+        with download_col2:
+            if ok_log_path.exists():
+                st.download_button(
+                    label="Download OK Log",
+                    data=ok_log_path.read_bytes(),
+                    file_name=ok_log_path.name,
+                    mime="text/tab-separated-values",
+                    key="download_metadata_ok_log"
+                )
+
+        with download_col3:
+            if err_log_path.exists():
+                st.download_button(
+                    label="Download Error Log",
+                    data=err_log_path.read_bytes(),
+                    file_name=err_log_path.name,
+                    mime="text/tab-separated-values",
+                    key="download_metadata_err_log"
+                )
+
+        if last_result.get("error_count", 0) > 0:
+            st.warning("Some items failed during the Ollama call or returned invalid JSON. Check the error log for details.")
+
+        rows = last_result.get("rows", [])
+        if rows:
+            with st.expander("Preview Generated Metadata", expanded=True):
+                st.dataframe(rows, use_container_width=True)

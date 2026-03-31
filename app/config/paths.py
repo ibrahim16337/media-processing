@@ -22,6 +22,16 @@ TRANSCRIPT_DIR = DATA_DIR / "transcripts"
 PLAYLISTS_DIR = DATA_DIR / "playlists"
 
 # ---------------------------------------------------
+# Metadata output directories
+# ---------------------------------------------------
+
+METADATA_OUTPUT_DIR = DATA_DIR / "metadata_outputs"
+METADATA_SINGLE_DIR = METADATA_OUTPUT_DIR / "single"
+METADATA_BATCH_DIR = METADATA_OUTPUT_DIR / "batch"
+METADATA_PLAYLIST_DIR = METADATA_OUTPUT_DIR / "playlists"
+METADATA_EXCEL_IMPORT_DIR = METADATA_OUTPUT_DIR / "excel_imports"
+
+# ---------------------------------------------------
 # Model directories
 # ---------------------------------------------------
 
@@ -94,6 +104,11 @@ def build_playlist_paths(playlist_name: str) -> PlaylistPaths:
         UPLOAD_VIDEO_DIR,
         TRANSCRIPT_DIR,
         PLAYLISTS_DIR,
+        METADATA_OUTPUT_DIR,
+        METADATA_SINGLE_DIR,
+        METADATA_BATCH_DIR,
+        METADATA_PLAYLIST_DIR,
+        METADATA_EXCEL_IMPORT_DIR,
         MODEL_DIR,
         WHISPER_CACHE_DIR,
         LOG_DIR,
@@ -123,6 +138,11 @@ dirs = [
     UPLOAD_VIDEO_DIR,
     TRANSCRIPT_DIR,
     PLAYLISTS_DIR,
+    METADATA_OUTPUT_DIR,
+    METADATA_SINGLE_DIR,
+    METADATA_BATCH_DIR,
+    METADATA_PLAYLIST_DIR,
+    METADATA_EXCEL_IMPORT_DIR,
     MODEL_DIR,
     WHISPER_CACHE_DIR,
     LOG_DIR,
