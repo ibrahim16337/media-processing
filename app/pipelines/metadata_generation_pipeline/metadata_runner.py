@@ -12,7 +12,7 @@ from app.config.paths import (
     METADATA_SINGLE_DIR,
     slugify,
 )
-from app.pipelines.metadata_generation_pipeline.metadata_excel_exporter import (
+from app.pipelines.export_pipeline.metadata_excel_exporter import (
     export_metadata_excel,
 )
 from app.pipelines.metadata_generation_pipeline.ollama_client import (

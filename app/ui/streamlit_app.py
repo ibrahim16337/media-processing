@@ -29,7 +29,7 @@ from app.pipelines.media_pipeline.youtube_downloader import download_youtube_aud
 from app.pipelines.media_pipeline.audio_standardizer import standardize_audio
 from app.pipelines.transcription_pipeline.transcription_runner import build_transcription_cmd
 from app.pipelines.playlist_pipeline.playlist_runner import run_playlist_download
-from app.pipelines.playlist_pipeline.playlist_excel_exporter import generate_playlist_excel
+from app.pipelines.export_pipeline.playlist_excel_exporter import generate_playlist_excel
 from app.pipelines.metadata_generation_pipeline.metadata_runner import run_metadata_generation
 from app.pipelines.metadata_generation_pipeline.ollama_client import (
     DEFAULT_MODEL,
