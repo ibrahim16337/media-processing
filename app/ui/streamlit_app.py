@@ -19,9 +19,11 @@ from app.config.paths import (
     TRANSCRIPT_DIR,
     PLAYLISTS_DIR,
     METADATA_OUTPUT_DIR,
+    METADATA_SINGLE_DIR,
     METADATA_PLAYLIST_DIR,
     METADATA_EXCEL_IMPORT_DIR,
 )
+
 from app.pipelines.media_pipeline.ingestion_runner import run_ingestion
 from app.pipelines.media_pipeline.youtube_downloader import download_youtube_audio
 from app.pipelines.media_pipeline.audio_standardizer import standardize_audio
@@ -149,6 +151,16 @@ def save_uploaded_files(uploaded_files):
 
 def save_uploaded_excel(uploaded_file):
     upload_dir = METADATA_EXCEL_IMPORT_DIR / "uploaded_excels"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+
+    save_path = upload_dir / uploaded_file.name
+    with open(save_path, "wb") as f:
+        f.write(uploaded_file.getbuffer())
+
+    return save_path
+
+def save_uploaded_transcript_file(uploaded_file):
+    upload_dir = METADATA_SINGLE_DIR / "uploaded_txt_inputs"
     upload_dir.mkdir(parents=True, exist_ok=True)
 
     save_path = upload_dir / uploaded_file.name
@@ -917,19 +929,45 @@ with tab5:
     selected_sheet_name = None
 
     if source_mode == "Single Transcript File":
-        transcript_files = get_all_transcript_files()
+        single_input_mode = st.radio(
+            "Transcript Source",
+            ["Existing Generated Transcript", "Upload TXT File"],
+            horizontal=True,
+            key="metadata_single_input_mode"
+        )
 
-        if not transcript_files:
-            st.info("No transcript files found in global transcripts or playlist transcript folders.")
+        if single_input_mode == "Existing Generated Transcript":
+            transcript_files = get_all_transcript_files()
+
+            if not transcript_files:
+                st.info("No transcript files found in global transcripts or playlist transcript folders.")
+            else:
+                file_options = [str(p) for p in transcript_files]
+
+                selected_file_str = st.selectbox(
+                    "Select Transcript File",
+                    options=file_options,
+                    format_func=lambda p: format_path_for_display(Path(p)),
+                    key="metadata_single_file_select"
+                )
+
+                selected_source_type = "single_file"
+                selected_source_path = Path(selected_file_str)
+
         else:
-            selected_file = st.selectbox(
-                "Select Transcript File",
-                options=transcript_files,
-                format_func=format_path_for_display,
-                key="metadata_single_file_select"
+            uploaded_txt = st.file_uploader(
+                "Upload Transcript TXT File",
+                type=["txt"],
+                key="metadata_single_txt_uploader",
+                help="You can drag and drop a .txt transcript file here or browse from your PC."
             )
-            selected_source_type = "single_file"
-            selected_source_path = selected_file
+
+            if uploaded_txt is not None:
+                saved_txt_path = save_uploaded_transcript_file(uploaded_txt)
+                st.success(f"Uploaded transcript saved: {saved_txt_path.name}")
+
+                selected_source_type = "single_file"
+                selected_source_path = saved_txt_path
 
     elif source_mode == "Transcript Folder":
         transcript_folders = get_transcript_source_folders()
