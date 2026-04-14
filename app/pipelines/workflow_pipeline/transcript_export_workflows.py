@@ -115,6 +115,49 @@ def _probe_media_duration(media_path: Path) -> str:
         return ""
 
 
+def _probe_video_dimensions(media_path: Path) -> tuple[int | None, int | None]:
+    if not media_path.exists() or not media_path.is_file():
+        return None, None
+
+    try:
+        cmd = [
+            str(FFPROBE_EXE),
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height",
+            "-of",
+            "csv=p=0:s=x",
+            str(media_path),
+        ]
+
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
+        value = result.stdout.strip()
+        if not value or "x" not in value:
+            return None, None
+
+        width_str, height_str = value.split("x", 1)
+        return int(width_str), int(height_str)
+
+    except Exception:
+        return None, None
+
+
+def _build_video_type_label(width: int | None, height: int | None) -> str:
+    if not width or not height:
+        return ""
+
+    return "Short" if height > width else "Long"
+
+
 def _find_matching_media_file(
     transcript_file: Path,
     media_lookup_dirs: Sequence[Path] | None = None,
@@ -164,11 +207,17 @@ def build_transcript_rows(
 
         audio_length = _probe_media_duration(matched_media) if matched_media else ""
 
+        video_type = ""
+        if matched_media:
+            width, height = _probe_video_dimensions(matched_media)
+            video_type = _build_video_type_label(width, height)
+
         rows.append(
             {
                 "filename": transcript_file.name,
                 "transcription": transcription_text,
                 "audio length": audio_length,
+                "video type": video_type,
             }
         )
 

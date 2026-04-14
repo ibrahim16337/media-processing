@@ -9,9 +9,9 @@ from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
 
-OUTPUT_HEADERS = ["filename", "transcription", "audio length"]
+OUTPUT_HEADERS = ["filename", "transcription", "audio length", "video type"]
 
- 
+
 def _safe_string(value: Any) -> str:
     if value is None:
         return ""
@@ -57,6 +57,7 @@ def export_transcript_excel(
                 _safe_string(row.get("filename", "")),
                 _safe_string(row.get("transcription", "")),
                 _safe_string(row.get("audio length", "")),
+                _safe_string(row.get("video type", "")),
             ]
         )
 
@@ -69,6 +70,7 @@ def export_transcript_excel(
     ws.column_dimensions["A"].width = min(max(float(ws.column_dimensions["A"].width or 0), 25), 40)
     ws.column_dimensions["B"].width = 90
     ws.column_dimensions["C"].width = min(max(float(ws.column_dimensions["C"].width or 0), 18), 25)
+    ws.column_dimensions["D"].width = min(max(float(ws.column_dimensions["D"].width or 0), 18), 25)
 
     wb.save(output_path)
     return output_path
