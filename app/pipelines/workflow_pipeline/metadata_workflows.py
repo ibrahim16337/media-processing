@@ -461,7 +461,7 @@ def generate_metadata_from_transcript_folder(
 
 
 def generate_metadata_from_transcript_files(
-    transcript_files: list[str | Path],
+    transcript_files: Sequence[str | Path],
     output_name: str | None = None,
     metadata_output_dir: str | Path | None = None,
     model: str = DEFAULT_MODEL,

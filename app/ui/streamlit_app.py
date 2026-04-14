@@ -1,13 +1,10 @@
-import os
 import sys
-import subprocess
-import time
-import re
 import shutil
-from pathlib import Path
-import streamlit as st
 import zipfile
 import io
+from pathlib import Path
+
+import streamlit as st
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -20,17 +17,33 @@ from app.config.paths import (
     PLAYLISTS_DIR,
     METADATA_OUTPUT_DIR,
     METADATA_SINGLE_DIR,
+    METADATA_BATCH_DIR,
     METADATA_PLAYLIST_DIR,
     METADATA_EXCEL_IMPORT_DIR,
 )
-
-from app.pipelines.media_pipeline.ingestion_runner import run_ingestion
-from app.pipelines.media_pipeline.youtube_downloader import download_youtube_audio
-from app.pipelines.media_pipeline.audio_standardizer import standardize_audio
-from app.pipelines.transcription_pipeline.transcription_runner import build_transcription_cmd
-from app.pipelines.playlist_pipeline.playlist_runner import run_playlist_download
-from app.pipelines.export_pipeline.playlist_excel_exporter import generate_playlist_excel
-from app.pipelines.metadata_generation_pipeline.metadata_runner import run_metadata_generation
+from app.pipelines.workflow_pipeline.transcription_workflows import (
+    transcribe_single_youtube,
+    transcribe_batch_media,
+    transcribe_playlist,
+)
+from app.pipelines.workflow_pipeline.metadata_workflows import (
+    generate_metadata_from_single_youtube,
+    generate_metadata_from_batch_media,
+    generate_metadata_from_playlist,
+    generate_metadata_from_single_transcript_file,
+    generate_metadata_from_transcript_folder,
+    generate_metadata_from_transcript_files,
+    generate_metadata_from_excel,
+)
+from app.pipelines.workflow_pipeline.transcript_export_workflows import (
+    export_global_transcripts_to_excel,
+    export_global_transcripts_to_json,
+    export_playlist_transcripts_to_excel,
+    export_playlist_transcripts_to_json,
+    build_global_transcripts_zip_bytes,
+    build_transcript_folder_zip_bytes,
+    build_transcript_zip_bytes,
+)
 from app.pipelines.metadata_generation_pipeline.ollama_client import (
     DEFAULT_MODEL,
     DEFAULT_BASE_URL,
@@ -47,7 +60,7 @@ from app.pipelines.metadata_generation_pipeline.transcript_sources import (
 )
 
 # --------------------------------------------------
-# Ensure required directories exist
+# Ensure directories exist
 # --------------------------------------------------
 
 UPLOAD_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
@@ -55,6 +68,8 @@ UPLOAD_VIDEO_DIR.mkdir(parents=True, exist_ok=True)
 TRANSCRIPT_DIR.mkdir(parents=True, exist_ok=True)
 PLAYLISTS_DIR.mkdir(parents=True, exist_ok=True)
 METADATA_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+METADATA_SINGLE_DIR.mkdir(parents=True, exist_ok=True)
+METADATA_BATCH_DIR.mkdir(parents=True, exist_ok=True)
 METADATA_PLAYLIST_DIR.mkdir(parents=True, exist_ok=True)
 METADATA_EXCEL_IMPORT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -62,17 +77,14 @@ METADATA_EXCEL_IMPORT_DIR.mkdir(parents=True, exist_ok=True)
 # Session state
 # --------------------------------------------------
 
-if "batch_uploader_nonce" not in st.session_state:
-    st.session_state["batch_uploader_nonce"] = 0
+st.session_state.setdefault("transcription_single_result", None)
+st.session_state.setdefault("transcription_batch_result", None)
+st.session_state.setdefault("transcription_playlist_result", None)
 
-if "batch_notice" not in st.session_state:
-    st.session_state["batch_notice"] = None
-
-if "global_notice" not in st.session_state:
-    st.session_state["global_notice"] = None
-
-if "metadata_last_result" not in st.session_state:
-    st.session_state["metadata_last_result"] = None
+st.session_state.setdefault("metadata_single_result", None)
+st.session_state.setdefault("metadata_batch_result", None)
+st.session_state.setdefault("metadata_playlist_result", None)
+st.session_state.setdefault("metadata_existing_result", None)
 
 # --------------------------------------------------
 # Constants
@@ -80,6 +92,7 @@ if "metadata_last_result" not in st.session_state:
 
 AUDIO_EXTS = {".mp3", ".wav", ".m4a", ".flac", ".ogg", ".opus", ".aac", ".wma"}
 VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".avi", ".webm"}
+TEXT_EXTS = {".txt"}
 EXCEL_EXTS = {".xlsx", ".xlsm"}
 
 # --------------------------------------------------
@@ -87,49 +100,35 @@ EXCEL_EXTS = {".xlsx", ".xlsm"}
 # --------------------------------------------------
 
 st.set_page_config(
-    page_title="AI Media Transcription",
+    page_title="AI Media Transcription & SEO Metadata",
     page_icon="🎙",
-    layout="wide"
+    layout="wide",
 )
 
-st.title("AI Media Transcription")
+st.title("AI Media Transcription & SEO Metadata")
 
 # --------------------------------------------------
 # Helpers
 # --------------------------------------------------
 
-def show_notice(notice):
-    if not notice:
-        return
-
-    level = notice.get("level", "info")
-    message = notice.get("message", "")
-
-    if level == "success":
-        st.success(message)
-    elif level == "warning":
-        st.warning(message)
-    elif level == "error":
-        st.error(message)
-    else:
-        st.info(message)
+def _safe_string(value):
+    if value is None:
+        return ""
+    return str(value).strip()
 
 
-def set_batch_notice(level: str, message: str):
-    st.session_state["batch_notice"] = {"level": level, "message": message}
-
-
-def set_global_notice(level: str, message: str):
-    st.session_state["global_notice"] = {"level": level, "message": message}
-
-
-def reset_batch_uploader():
-    st.session_state["batch_uploader_nonce"] += 1
+def save_uploaded_file(uploaded_file, destination_dir: Path) -> Path:
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    save_path = destination_dir / uploaded_file.name
+    with open(save_path, "wb") as f:
+        f.write(uploaded_file.getbuffer())
+    return save_path
 
 
 def save_uploaded_files(uploaded_files):
     audio_count = 0
     video_count = 0
+    saved_paths = []
 
     for file in uploaded_files:
         ext = Path(file.name).suffix.lower()
@@ -144,30 +143,27 @@ def save_uploaded_files(uploaded_files):
             continue
 
         with open(save_path, "wb") as f:
-            f.write(file.read())
+            f.write(file.getbuffer())
 
-    return audio_count, video_count
+        saved_paths.append(save_path)
+
+    return audio_count, video_count, saved_paths
 
 
-def save_uploaded_excel(uploaded_file):
+def save_uploaded_transcript_files(uploaded_files, destination_dir: Path) -> list[Path]:
+    saved_paths: list[Path] = []
+
+    for file in uploaded_files:
+        if Path(file.name).suffix.lower() not in TEXT_EXTS:
+            continue
+        saved_paths.append(save_uploaded_file(file, destination_dir))
+
+    return saved_paths
+
+
+def save_uploaded_excel(uploaded_file) -> Path:
     upload_dir = METADATA_EXCEL_IMPORT_DIR / "uploaded_excels"
-    upload_dir.mkdir(parents=True, exist_ok=True)
-
-    save_path = upload_dir / uploaded_file.name
-    with open(save_path, "wb") as f:
-        f.write(uploaded_file.getbuffer())
-
-    return save_path
-
-def save_uploaded_transcript_file(uploaded_file):
-    upload_dir = METADATA_SINGLE_DIR / "uploaded_txt_inputs"
-    upload_dir.mkdir(parents=True, exist_ok=True)
-
-    save_path = upload_dir / uploaded_file.name
-    with open(save_path, "wb") as f:
-        f.write(uploaded_file.getbuffer())
-
-    return save_path
+    return save_uploaded_file(uploaded_file, upload_dir)
 
 
 def clear_files_in_folder(folder: Path, allowed_exts=None):
@@ -208,9 +204,9 @@ def clear_folder_contents(folder: Path):
 
 
 def clear_generated_project_data():
-    removed_audio = clear_files_in_folder(UPLOAD_AUDIO_DIR, AUDIO_EXTS | {".webm"})
+    removed_audio = clear_files_in_folder(UPLOAD_AUDIO_DIR, AUDIO_EXTS | VIDEO_EXTS)
     removed_video = clear_files_in_folder(UPLOAD_VIDEO_DIR, VIDEO_EXTS)
-    removed_transcripts = clear_files_in_folder(TRANSCRIPT_DIR, {".txt", ".zip", ".json"})
+    removed_transcripts = clear_files_in_folder(TRANSCRIPT_DIR, {".txt", ".zip", ".json", ".xlsx"})
     playlist_files, playlist_dirs = clear_folder_contents(PLAYLISTS_DIR)
     metadata_files, metadata_dirs = clear_folder_contents(METADATA_OUTPUT_DIR)
 
@@ -229,7 +225,7 @@ def build_clear_summary_message(summary: dict):
     return (
         f"Cleared data: {summary['audio_files']} audio file(s), "
         f"{summary['video_files']} video file(s), "
-        f"{summary['transcript_files']} transcript file(s), "
+        f"{summary['transcript_files']} transcript/export file(s), "
         f"{summary['playlist_dirs']} playlist folder(s), "
         f"{summary['playlist_files']} extra playlist file(s), "
         f"{summary['metadata_dirs']} metadata folder(s), "
@@ -255,33 +251,12 @@ def delete_playlist_folder_by_slug(slug: str):
         return False, f"Failed to delete playlist folder: {e}"
 
 
-def build_zip_from_folder(folder: Path, pattern: str = "*.txt"):
-    zip_buffer = io.BytesIO()
-
-    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
-        for file in sorted(folder.glob(pattern)):
-            zip_file.write(file, arcname=file.name)
-
-    zip_buffer.seek(0)
-    return zip_buffer
-
-
 def get_audio_files(folder: Path):
-    return sorted(
-        [
-            f for f in folder.glob("*")
-            if f.is_file() and f.suffix.lower() in AUDIO_EXTS
-        ]
-    )
+    return sorted([f for f in folder.glob("*") if f.is_file() and f.suffix.lower() in AUDIO_EXTS])
 
 
 def get_video_files(folder: Path):
-    return sorted(
-        [
-            f for f in folder.glob("*")
-            if f.is_file() and f.suffix.lower() in VIDEO_EXTS
-        ]
-    )
+    return sorted([f for f in folder.glob("*") if f.is_file() and f.suffix.lower() in VIDEO_EXTS])
 
 
 def get_all_transcript_files():
@@ -303,11 +278,8 @@ def get_transcript_source_folders():
         folders.append(TRANSCRIPT_DIR)
 
     playlist_transcript_dirs = sorted(
-        [
-            p for p in PLAYLISTS_DIR.glob("*/transcripts")
-            if p.is_dir()
-        ],
-        key=lambda p: str(p).lower()
+        [p for p in PLAYLISTS_DIR.glob("*/transcripts") if p.is_dir()],
+        key=lambda p: str(p).lower(),
     )
     folders.extend(playlist_transcript_dirs)
 
@@ -335,6 +307,10 @@ def get_existing_excel_sources():
     return sorted(unique.values(), key=lambda p: str(p).lower())
 
 
+def get_playlist_slugs():
+    return sorted([p.name for p in PLAYLISTS_DIR.glob("*") if p.is_dir()])
+
+
 def format_path_for_display(path: Path):
     try:
         return str(path.relative_to(ROOT))
@@ -342,855 +318,1109 @@ def format_path_for_display(path: Path):
         return str(path)
 
 
-def path_is_under(child: Path, parent: Path):
-    try:
-        child.resolve().relative_to(parent.resolve())
-        return True
-    except Exception:
-        return False
-
-
-def resolve_metadata_output_dir_for_source(source_path: Path):
-    if path_is_under(source_path, PLAYLISTS_DIR):
-        return METADATA_PLAYLIST_DIR
-    return None
-
-
 def read_text_file(path: Path):
     try:
         return path.read_text(encoding="utf-8")
     except Exception:
-        return "Unable to read transcript file."
+        return "Unable to read file."
 
 
-def run_transcription_with_progress(input_path: Path, output_dir: Path):
-    progress_pattern = re.compile(r"(\d+\.\d+)%")
+def render_text_download(path: Path, label: str, key_prefix: str):
+    if path.exists():
+        st.download_button(
+            label=label,
+            data=path.read_bytes(),
+            file_name=path.name,
+            mime="text/plain",
+            key=f"{key_prefix}_{path.name}_txt_download",
+        )
 
-    progress_bar = st.progress(0)
-    percent_container = st.empty()
-    elapsed_container = st.empty()
-    eta_container = st.empty()
-    output_box = st.empty()
 
-    start_transcribe = time.time()
-    output_lines = []
+def render_binary_download(path: Path, label: str, mime: str, key_prefix: str):
+    if path.exists():
+        st.download_button(
+            label=label,
+            data=path.read_bytes(),
+            file_name=path.name,
+            mime=mime,
+            key=f"{key_prefix}_{path.name}_download",
+        )
 
-    cmd = build_transcription_cmd(input_path, output_dir)
 
-    env = os.environ.copy()
-    env["PYTHONUTF8"] = "1"
-    env["PYTHONIOENCODING"] = "utf-8"
+def render_transcript_preview(transcript_file: Path, key_prefix: str):
+    if not transcript_file.exists():
+        return
 
-    process = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        bufsize=1,
-        env=env
+    transcript_text = read_text_file(transcript_file)
+
+    st.download_button(
+        label="Download Transcript TXT",
+        data=transcript_text.encode("utf-8"),
+        file_name=transcript_file.name,
+        mime="text/plain",
+        key=f"{key_prefix}_{transcript_file.stem}_download_txt",
     )
 
-    last_update = 0
+    st.text_area(
+        "Transcript Preview",
+        value=transcript_text,
+        height=300,
+        key=f"{key_prefix}_{transcript_file.stem}_preview",
+    )
 
-    while True:
-        line = process.stdout.readline() if process.stdout else ""
 
-        if not line and process.poll() is not None:
-            break
+def render_metadata_outputs(metadata_result: dict, key_prefix: str):
+    if not metadata_result:
+        return
 
-        if line:
-            clean_line = line.strip()
+    excel_output = Path(metadata_result.get("excel_output", ""))
+    json_output = Path(metadata_result.get("json_output", ""))
+    ok_log = Path(metadata_result.get("ok_log", ""))
+    err_log = Path(metadata_result.get("err_log", ""))
 
-            if clean_line:
-                output_lines.append(clean_line)
-                output_box.code("\n".join(output_lines[-15:]))
+    col1, col2, col3, col4 = st.columns(4)
 
-            match = progress_pattern.search(line)
+    with col1:
+        render_binary_download(
+            excel_output,
+            "Download Metadata Excel",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            f"{key_prefix}_metadata_excel",
+        )
 
-            if match:
-                percent = float(match.group(1))
-                progress_bar.progress(max(0, min(100, int(percent))))
+    with col2:
+        render_binary_download(
+            json_output,
+            "Download Metadata JSON",
+            "application/json",
+            f"{key_prefix}_metadata_json",
+        )
 
-                elapsed = time.time() - start_transcribe
-                eta = ((elapsed / percent) * (100 - percent)) if percent > 0 else 0
+    with col3:
+        render_binary_download(
+            ok_log,
+            "Download OK Log",
+            "text/tab-separated-values",
+            f"{key_prefix}_metadata_oklog",
+        )
 
-                now = time.time()
-                if now - last_update > 0.5:
-                    percent_container.markdown(f"Progress: **{percent:.2f}%**")
-                    elapsed_container.markdown(f"Elapsed: **{int(elapsed)} sec**")
-                    eta_container.markdown(f"ETA: **{int(eta)} sec**")
-                    last_update = now
+    with col4:
+        render_binary_download(
+            err_log,
+            "Download Error Log",
+            "text/tab-separated-values",
+            f"{key_prefix}_metadata_errlog",
+        )
 
-    process.wait()
+    rows = metadata_result.get("rows", [])
+    if rows:
+        with st.expander("Metadata Preview", expanded=True):
+            st.dataframe(rows, use_container_width=True)
 
-    transcription_time = time.time() - start_transcribe
-    success = process.returncode == 0
+    if metadata_result.get("error_count", 0) > 0:
+        st.warning("Some items failed during the Ollama call or response parsing. Check the error log.")
 
-    if success:
-        progress_bar.progress(100)
 
-    return success, transcription_time, output_lines
+def render_playlist_management_ui(key_prefix: str):
+    manage_col1, manage_col2 = st.columns(2)
+
+    with manage_col1:
+        if st.button("Clear All Playlist Folders", key=f"{key_prefix}_clear_all_playlists"):
+            removed_files, removed_dirs = clear_folder_contents(PLAYLISTS_DIR)
+            st.success(f"Removed {removed_dirs} playlist folder(s) and {removed_files} extra file(s).")
+
+    with manage_col2:
+        if st.button("Clear All Generated Data", key=f"{key_prefix}_clear_all_data"):
+            summary = clear_generated_project_data()
+            st.success(build_clear_summary_message(summary))
+
+    playlist_slug_to_clear = st.text_input(
+        "Enter playlist slug to delete",
+        key=f"{key_prefix}_playlist_slug_to_clear",
+        placeholder="e.g. drisrar-ahmad-short-clips",
+    )
+
+    if st.button("Delete This Playlist Folder", key=f"{key_prefix}_delete_playlist_folder"):
+        ok, msg = delete_playlist_folder_by_slug(playlist_slug_to_clear)
+        if ok:
+            st.success(msg)
+        else:
+            st.warning(msg)
 
 
 # --------------------------------------------------
 # Tabs
 # --------------------------------------------------
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "YouTube",
-    "Upload & Batch Process",
-    "Transcripts",
-    "Playlist Download & Transcription",
-    "Metadata / SEO Generation",
+transcription_tab, metadata_tab = st.tabs([
+    "Transcription",
+    "Metadata / SEO",
 ])
 
 # ==================================================
-# TAB 1 — YOUTUBE
+# TAB 1 — TRANSCRIPTION
 # ==================================================
 
-with tab1:
-    st.header("YouTube Transcription")
+with transcription_tab:
+    t_single, t_batch, t_playlist, t_exports = st.tabs([
+        "Single YouTube",
+        "Batch Media",
+        "Playlist",
+        "Transcript Exports",
+    ])
 
-    show_notice(st.session_state["global_notice"])
-    st.session_state["global_notice"] = None
+    # ----------------------------------------------
+    # Single YouTube
+    # ----------------------------------------------
 
-    col_a, col_b = st.columns(2)
+    with t_single:
+        st.subheader("Single YouTube Transcription")
 
-    with col_a:
-        if st.button("Clear All Generated Project Data", key="tab1_clear_all_data"):
-            summary = clear_generated_project_data()
-            set_global_notice("success", build_clear_summary_message(summary))
-            reset_batch_uploader()
-            st.session_state["metadata_last_result"] = None
-            st.rerun()
+        yt_url = st.text_input("Paste YouTube Link", key="transcription_single_youtube_url")
 
-    youtube_url = st.text_input("Paste YouTube Link", key="youtube_url")
+        single_col1, single_col2 = st.columns(2)
 
-    if st.button("Download & Transcribe", key="yt_button"):
-        if not youtube_url.strip():
-            st.warning("Please paste a YouTube link first.")
-        else:
-            try:
-                progress_bar = st.progress(0)
-                percent_box = st.empty()
-                eta_box = st.empty()
-                speed_box = st.empty()
-
-                start_download = time.time()
-
-                def progress_hook(d):
-                    if d["status"] == "downloading":
-                        total = d.get("total_bytes") or d.get("total_bytes_estimate")
-                        downloaded = d.get("downloaded_bytes", 0)
-
-                        if total:
-                            percent = downloaded / total * 100
-                            progress_bar.progress(max(0, min(100, int(percent))))
-                            percent_box.markdown(f"Download: **{percent:.2f}%**")
-
-                        eta = d.get("eta")
-                        if eta is not None:
-                            eta_box.markdown(f"ETA: **{eta} sec**")
-
-                        speed = d.get("speed")
-                        if speed:
-                            speed_box.markdown(f"Speed: **{speed / 1024 / 1024:.2f} MB/s**")
-
-                    elif d["status"] == "finished":
-                        progress_bar.progress(100)
-
-                st.write("Downloading audio...")
-                audio_file = download_youtube_audio(
-                    youtube_url,
-                    progress_callback=progress_hook
-                )
-                download_time = time.time() - start_download
-
-                st.success(f"Downloaded: {audio_file.name}")
-
-                st.write("Standardizing audio...")
-                convert_start = time.time()
-                wav_file = standardize_audio(audio_file, UPLOAD_AUDIO_DIR)
-                convert_time = time.time() - convert_start
-
-                st.success(f"Audio standardized: {wav_file.name}")
-
-                st.subheader("Transcription")
-                success, transcription_time, _ = run_transcription_with_progress(
-                    wav_file,
-                    TRANSCRIPT_DIR
-                )
-
-                if success:
-                    transcript_file = TRANSCRIPT_DIR / f"{wav_file.stem}.txt"
-
-                    st.subheader("Statistics")
-                    st.write(f"Download Time: **{download_time:.2f} sec**")
-                    st.write(f"Conversion Time: **{convert_time:.2f} sec**")
-                    st.write(f"Transcription Time: **{transcription_time:.2f} sec**")
-
-                    if transcript_file.exists():
-                        text = read_text_file(transcript_file)
-
-                        st.success("Transcription completed successfully.")
-
-                        st.download_button(
-                            label="Download This Transcript",
-                            data=text.encode("utf-8"),
-                            file_name=transcript_file.name,
-                            mime="text/plain",
-                            key=f"download_single_{wav_file.stem}"
-                        )
-
-                        st.text_area(
-                            "Transcript Preview",
-                            value=text,
-                            height=320,
-                            key=f"yt_preview_{wav_file.stem}"
-                        )
-                    else:
-                        st.warning("Transcription finished, but transcript file was not found.")
+        with single_col1:
+            if st.button("Transcribe YouTube Video", key="transcription_single_youtube_button"):
+                if not yt_url.strip():
+                    st.warning("Please paste a YouTube link first.")
                 else:
-                    st.error("Transcription failed.")
+                    try:
+                        with st.spinner("Downloading, standardizing, and transcribing..."):
+                            result = transcribe_single_youtube(yt_url.strip())
 
-            except Exception as e:
-                st.error(f"Error: {e}")
+                        st.session_state["transcription_single_result"] = result
 
-# ==================================================
-# TAB 2 — UPLOAD & BATCH PROCESS
-# ==================================================
-
-with tab2:
-    st.header("Upload & Batch Transcription")
-
-    show_notice(st.session_state["batch_notice"])
-    st.session_state["batch_notice"] = None
-
-    row1_col1, row1_col2, row1_col3, row1_col4 = st.columns(4)
-
-    with row1_col1:
-        if st.button("Clear Audio Uploads", key="clear_audio_uploads"):
-            removed = clear_files_in_folder(UPLOAD_AUDIO_DIR, AUDIO_EXTS)
-            set_batch_notice("success", f"Removed {removed} audio file(s).")
-            reset_batch_uploader()
-            st.rerun()
-
-    with row1_col2:
-        if st.button("Clear Video Uploads", key="clear_video_uploads"):
-            removed = clear_files_in_folder(UPLOAD_VIDEO_DIR, VIDEO_EXTS)
-            set_batch_notice("success", f"Removed {removed} video file(s).")
-            reset_batch_uploader()
-            st.rerun()
-
-    with row1_col3:
-        if st.button("Clear Transcripts", key="clear_batch_transcripts"):
-            removed = clear_files_in_folder(TRANSCRIPT_DIR, {".txt", ".zip", ".json"})
-            set_batch_notice("success", f"Removed {removed} transcript file(s).")
-            st.rerun()
-
-    with row1_col4:
-        if st.button("Clear All Generated Data", key="clear_batch_all_generated"):
-            summary = clear_generated_project_data()
-            set_batch_notice("success", build_clear_summary_message(summary))
-            reset_batch_uploader()
-            st.session_state["metadata_last_result"] = None
-            st.rerun()
-
-    uploaded_files = st.file_uploader(
-        "Upload audio or video files",
-        accept_multiple_files=True,
-        type=[
-            "mp3", "wav", "m4a", "flac", "ogg", "opus", "aac", "wma",
-            "mp4", "mkv", "mov", "avi", "webm"
-        ],
-        key=f"batch_uploader_{st.session_state['batch_uploader_nonce']}"
-    )
-
-    save_col1, save_col2 = st.columns(2)
-
-    with save_col1:
-        if st.button("Save Uploaded Files", key="save_batch_files"):
-            if uploaded_files:
-                audio_count, video_count = save_uploaded_files(uploaded_files)
-                set_batch_notice(
-                    "success",
-                    f"Saved {len(uploaded_files)} file(s) ({audio_count} audio, {video_count} video)."
-                )
-                reset_batch_uploader()
-                st.rerun()
-            else:
-                st.warning("Please choose files first.")
-
-    current_audio_files = get_audio_files(UPLOAD_AUDIO_DIR)
-    current_video_files = get_video_files(UPLOAD_VIDEO_DIR)
-
-    st.write(f"Audio files available: **{len(current_audio_files)}**")
-    st.write(f"Video files available: **{len(current_video_files)}**")
-
-    if st.button("Start Batch Transcription", key="batch_transcribe_button"):
-        try:
-            batch_start = time.time()
-
-            if current_video_files:
-                st.subheader("Standardizing Video Files")
-                standardized_files = run_ingestion(UPLOAD_VIDEO_DIR, UPLOAD_AUDIO_DIR)
-                st.success(f"{len(standardized_files)} video file(s) standardized to audio.")
-            else:
-                st.info("No video files found to standardize.")
-
-            audio_files_after_standardization = get_audio_files(UPLOAD_AUDIO_DIR)
-
-            if not audio_files_after_standardization:
-                st.warning("No audio files available for transcription.")
-            else:
-                st.subheader("Transcription")
-                success, transcription_time, _ = run_transcription_with_progress(
-                    UPLOAD_AUDIO_DIR,
-                    TRANSCRIPT_DIR
-                )
-
-                batch_time = time.time() - batch_start
-
-                if success:
-                    st.success("Batch transcription completed successfully.")
-                    st.subheader("Batch Statistics")
-                    st.write(f"Audio files processed: **{len(audio_files_after_standardization)}**")
-                    st.write(f"Total batch time: **{batch_time:.2f} sec**")
-                    st.write(f"Transcription time: **{transcription_time:.2f} sec**")
-                else:
-                    st.error("Batch transcription failed.")
-
-        except Exception as e:
-            st.error(f"Error: {e}")
-
-# ==================================================
-# TAB 3 — TRANSCRIPTS
-# ==================================================
-
-with tab3:
-    st.header("Transcripts")
-
-    show_notice(st.session_state["global_notice"])
-    st.session_state["global_notice"] = None
-
-    tab3_col1, tab3_col2 = st.columns(2)
-
-    with tab3_col1:
-        if st.button("Clear Transcript Files", key="tab3_clear_transcripts"):
-            removed = clear_files_in_folder(TRANSCRIPT_DIR, {".txt", ".zip", ".json"})
-            set_global_notice("success", f"Removed {removed} transcript file(s).")
-            st.rerun()
-
-    with tab3_col2:
-        if st.button("Clear All Generated Project Data", key="tab3_clear_all_data"):
-            summary = clear_generated_project_data()
-            set_global_notice("success", build_clear_summary_message(summary))
-            reset_batch_uploader()
-            st.session_state["metadata_last_result"] = None
-            st.rerun()
-
-    transcripts = sorted(TRANSCRIPT_DIR.glob("*.txt"))
-
-    if transcripts:
-        zip_buffer = build_zip_from_folder(TRANSCRIPT_DIR, "*.txt")
-
-        st.download_button(
-            label="Download All Transcripts (ZIP)",
-            data=zip_buffer,
-            file_name="transcripts.zip",
-            mime="application/zip",
-            key="download_all_transcripts_zip"
-        )
-    else:
-        st.info("No transcript files found yet.")
-
-    for t in transcripts:
-        with st.expander(t.name):
-            text = read_text_file(t)
-
-            st.download_button(
-                label=f"Download {t.name}",
-                data=text.encode("utf-8"),
-                file_name=t.name,
-                mime="text/plain",
-                key=f"download_{t.stem}"
-            )
-
-            st.text_area(
-                label="Transcript",
-                value=text,
-                height=300,
-                key=f"global_transcript_{t.stem}"
-            )
-
-# ==================================================
-# TAB 4 — PLAYLIST DOWNLOAD & TRANSCRIPTION
-# ==================================================
-
-with tab4:
-    st.header("Playlist Download & Transcription")
-
-    show_notice(st.session_state["global_notice"])
-    st.session_state["global_notice"] = None
-
-    manage_col1, manage_col2 = st.columns(2)
-
-    with manage_col1:
-        if st.button("Clear All Playlist Folders", key="clear_all_playlists"):
-            removed_files, removed_dirs = clear_folder_contents(PLAYLISTS_DIR)
-            set_global_notice(
-                "success",
-                f"Removed {removed_dirs} playlist folder(s) and {removed_files} extra file(s)."
-            )
-            st.rerun()
-
-    with manage_col2:
-        if st.button("Clear All Generated Project Data", key="tab4_clear_all_data"):
-            summary = clear_generated_project_data()
-            set_global_notice("success", build_clear_summary_message(summary))
-            reset_batch_uploader()
-            st.session_state["metadata_last_result"] = None
-            st.rerun()
-
-    playlist_slug_to_clear = st.text_input(
-        "Enter playlist slug to delete",
-        key="playlist_slug_to_clear",
-        placeholder="e.g. drisrar-ahmad-short-clips"
-    )
-
-    if st.button("Delete This Playlist Folder", key="clear_playlist_folder_button"):
-        ok, msg = delete_playlist_folder_by_slug(playlist_slug_to_clear)
-        if ok:
-            set_global_notice("success", msg)
-        else:
-            set_global_notice("warning", msg)
-        st.rerun()
-
-    playlist_url = st.text_input("Paste YouTube Playlist Link", key="playlist_url")
-    quality = st.selectbox(
-        "Select Download Quality",
-        ["480p", "720p", "1080p"],
-        index=1,
-        key="playlist_quality"
-    )
-
-    if st.button("Download Playlist and Transcribe", key="playlist_button"):
-        if not playlist_url.strip():
-            st.warning("Please paste a playlist link first.")
-        else:
-            try:
-                st.subheader("Downloading Playlist")
-
-                playlist_progress = st.progress(0)
-                download_status = st.empty()
-                current_file_box = st.empty()
-
-                def playlist_progress_hook(d):
-                    status = d.get("status", "")
-
-                    if status == "downloading":
-                        filename = Path(d.get("filename", "")).name if d.get("filename") else "current file"
-                        current_file_box.markdown(f"Downloading: **{filename}**")
-
-                        total = d.get("total_bytes") or d.get("total_bytes_estimate")
-                        downloaded = d.get("downloaded_bytes", 0)
-
-                        if total:
-                            percent = int((downloaded / total) * 100)
-                            percent = max(0, min(100, percent))
-                            playlist_progress.progress(percent)
-
-                    elif status == "finished":
-                        filename = Path(d.get("filename", "")).name if d.get("filename") else "file"
-                        download_status.markdown(f"Finished: **{filename}**")
-                        playlist_progress.progress(100)
-
-                playlist_start = time.time()
-
-                playlist_data = run_playlist_download(
-                    url=playlist_url,
-                    quality=quality,
-                    progress_callback=playlist_progress_hook
-                )
-
-                playlist_elapsed = time.time() - playlist_start
-
-                result = playlist_data["result"]
-                standardized_files = playlist_data["standardized_files"]
-                paths = result["paths"]
-                manifest = result["manifest"]
-
-                st.success("Playlist download complete.")
-                st.write(f"Playlist: **{manifest.get('playlist_title', 'Unknown')}**")
-                st.write(f"Videos found: **{manifest.get('entry_count', 0)}**")
-                st.write(f"Quality selected: **{manifest.get('requested_quality', quality)}**")
-                st.write(f"Download time: **{playlist_elapsed:.2f} sec**")
-                st.write(f"Audio files prepared: **{len(standardized_files)}**")
-
-                st.subheader("Transcribing Playlist")
-
-                success, transcription_time, _ = run_transcription_with_progress(
-                    paths.audio,
-                    paths.transcripts
-                )
-
-                if success:
-                    st.success("Playlist transcription complete.")
-                    st.write(f"Transcription time: **{transcription_time:.2f} sec**")
-
-                    excel_file = generate_playlist_excel(paths, manifest)
-                    if excel_file.exists():
-                        excel_bytes = excel_file.read_bytes()
-                        st.download_button(
-                            label="Download Playlist Excel File",
-                            data=excel_bytes,
-                            file_name=excel_file.name,
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            key=f"playlist_excel_{paths.root.name}"
-                        )
-
-                    playlist_transcripts = sorted(paths.transcripts.glob("*.txt"))
-
-                    if playlist_transcripts:
-                        transcript_zip = build_zip_from_folder(paths.transcripts, "*.txt")
-
-                        st.download_button(
-                            label="Download Playlist Transcripts (ZIP)",
-                            data=transcript_zip,
-                            file_name=f"{paths.root.name}_transcripts.zip",
-                            mime="application/zip",
-                            key=f"playlist_zip_{paths.root.name}"
-                        )
-
-                        for t in playlist_transcripts:
-                            with st.expander(t.name):
-                                text = read_text_file(t)
-
-                                st.download_button(
-                                    label=f"Download {t.name}",
-                                    data=text.encode("utf-8"),
-                                    file_name=t.name,
-                                    mime="text/plain",
-                                    key=f"playlist_download_{paths.root.name}_{t.stem}"
-                                )
-
-                                st.text_area(
-                                    label="Transcript",
-                                    value=text,
-                                    height=300,
-                                    key=f"playlist_transcript_{paths.root.name}_{t.stem}"
-                                )
-                    else:
-                        st.warning("Playlist transcription finished, but no transcript files were found.")
-                else:
-                    st.error("Playlist transcription failed.")
-
-            except Exception as e:
-                st.error(f"Error: {e}")
-
-# ==================================================
-# TAB 5 — METADATA / SEO GENERATION
-# ==================================================
-
-with tab5:
-    st.header("Metadata / SEO Generation")
-    st.write("Generate title, description, tags, and hashtags from transcript text using Ollama.")
-
-    metadata_manage_col1, metadata_manage_col2 = st.columns(2)
-
-    with metadata_manage_col1:
-        if st.button("Clear All Metadata Outputs", key="clear_all_metadata_outputs"):
-            removed_files, removed_dirs = clear_folder_contents(METADATA_OUTPUT_DIR)
-            st.session_state["metadata_last_result"] = None
-            st.success(f"Removed {removed_dirs} metadata folder(s) and {removed_files} metadata file(s).")
-            st.rerun()
-
-    with metadata_manage_col2:
-        if st.button("Clear All Generated Project Data", key="tab5_clear_all_data"):
-            summary = clear_generated_project_data()
-            st.session_state["metadata_last_result"] = None
-            st.success(build_clear_summary_message(summary))
-            reset_batch_uploader()
-            st.rerun()
-
-    source_mode = st.radio(
-        "Choose Source Type",
-        ["Single Transcript File", "Transcript Folder", "Excel File"],
-        horizontal=True,
-        key="metadata_source_mode"
-    )
-
-    selected_source_type = None
-    selected_source_path = None
-    selected_transcript_column = None
-    selected_filename_column = None
-    selected_sheet_name = None
-
-    if source_mode == "Single Transcript File":
-        single_input_mode = st.radio(
-            "Transcript Source",
-            ["Existing Generated Transcript", "Upload TXT File"],
-            horizontal=True,
-            key="metadata_single_input_mode"
-        )
-
-        if single_input_mode == "Existing Generated Transcript":
-            transcript_files = get_all_transcript_files()
-
-            if not transcript_files:
-                st.info("No transcript files found in global transcripts or playlist transcript folders.")
-            else:
-                file_options = [str(p) for p in transcript_files]
-
-                selected_file_str = st.selectbox(
-                    "Select Transcript File",
-                    options=file_options,
-                    format_func=lambda p: format_path_for_display(Path(p)),
-                    key="metadata_single_file_select"
-                )
-
-                selected_source_type = "single_file"
-                selected_source_path = Path(selected_file_str)
-
-        else:
-            uploaded_txt = st.file_uploader(
-                "Upload Transcript TXT File",
-                type=["txt"],
-                key="metadata_single_txt_uploader",
-                help="You can drag and drop a .txt transcript file here or browse from your PC."
-            )
-
-            if uploaded_txt is not None:
-                saved_txt_path = save_uploaded_transcript_file(uploaded_txt)
-                st.success(f"Uploaded transcript saved: {saved_txt_path.name}")
-
-                selected_source_type = "single_file"
-                selected_source_path = saved_txt_path
-
-    elif source_mode == "Transcript Folder":
-        transcript_folders = get_transcript_source_folders()
-
-        if not transcript_folders:
-            st.info("No transcript folders found.")
-        else:
-            folder_options = [str(p) for p in transcript_folders]
-
-            selected_folder_str = st.selectbox(
-                "Select Transcript Folder",
-                options=folder_options,
-                format_func=lambda p: format_path_for_display(Path(p)),
-                key="metadata_folder_select"
-            )
-
-            selected_folder_path = Path(selected_folder_str)
-            selected_source_type = "folder"
-            selected_source_path = selected_folder_path
-        
-            txt_count = len(list(selected_folder_path.glob("*.txt")))
-            st.write(f"Transcript files found in selected folder: **{txt_count}**")
-            
-
-    elif source_mode == "Excel File":
-        excel_input_mode = st.radio(
-            "Excel Source",
-            ["Existing Generated Excel File", "Upload Excel File"],
-            horizontal=True,
-            key="metadata_excel_source_mode"
-        )
-
-        selected_excel_path = None
-
-        if excel_input_mode == "Existing Generated Excel File":
-            excel_files = get_existing_excel_sources()
-
-            if not excel_files:
-                st.info("No Excel files found. Generate a playlist Excel first or upload one below.")
-            else:
-                selected_excel_path = st.selectbox(
-                    "Select Excel File",
-                    options=excel_files,
-                    format_func=format_path_for_display,
-                    key="metadata_existing_excel_select"
-                )
-
-        else:
-            uploaded_excel = st.file_uploader(
-                "Upload Excel File",
-                type=["xlsx", "xlsm"],
-                key="metadata_excel_uploader"
-            )
-
-            if uploaded_excel is not None:
-                selected_excel_path = save_uploaded_excel(uploaded_excel)
-                st.success(f"Uploaded Excel saved: {selected_excel_path.name}")
-
-        if selected_excel_path:
-            try:
-                sheet_names = get_excel_sheet_names(selected_excel_path)
-
-                if not sheet_names:
-                    st.warning("No sheets found in the selected Excel file.")
-                else:
-                    selected_sheet_name = st.selectbox(
-                        "Select Sheet",
-                        options=sheet_names,
-                        key="metadata_excel_sheet_select"
-                    )
-
-                    columns = get_excel_columns(selected_excel_path, selected_sheet_name)
-
-                    if not columns:
-                        st.warning("No columns found in the selected sheet.")
-                    else:
-                        transcript_default_index = 0
-                        lower_columns = [c.strip().lower() for c in columns]
-                        if "transcription" in lower_columns:
-                            transcript_default_index = lower_columns.index("transcription")
-
-                        selected_transcript_column = st.selectbox(
-                            "Transcript Column",
-                            options=columns,
-                            index=transcript_default_index,
-                            key="metadata_transcript_column_select"
-                        )
-
-                        filename_options = ["(auto-generate row names)"] + columns
-                        filename_default_index = 0
-                        if "title" in lower_columns:
-                            filename_default_index = lower_columns.index("title") + 1
-
-                        filename_choice = st.selectbox(
-                            "Filename Column (optional)",
-                            options=filename_options,
-                            index=filename_default_index,
-                            key="metadata_filename_column_select"
-                        )
-
-                        if filename_choice != "(auto-generate row names)":
-                            selected_filename_column = filename_choice
+                        if result.get("ok", False):
+                            st.success("Transcription completed successfully.")
                         else:
-                            selected_filename_column = None
+                            st.error("Transcription failed.")
+                    except Exception as e:
+                        st.error(f"Error: {e}")
 
-                        selected_source_type = "excel"
-                        selected_source_path = selected_excel_path
+        with single_col2:
+            if st.button("Clear All Generated Data", key="transcription_single_clear_all"):
+                summary = clear_generated_project_data()
+                st.success(build_clear_summary_message(summary))
 
-            except Exception as e:
-                st.error(f"Failed to inspect Excel file: {e}")
+        single_result = st.session_state.get("transcription_single_result")
 
-    output_name = st.text_input(
-        "Output Name (optional)",
-        value="",
-        placeholder="e.g. seo-metadata",
-        key="metadata_output_name"
-    )
+        if single_result:
+            st.write(f"Download time: **{single_result.get('download_time_sec', 0):.2f} sec**")
+            st.write(f"Standardize time: **{single_result.get('standardize_time_sec', 0):.2f} sec**")
+            st.write(f"Transcription time: **{single_result.get('transcription_time_sec', 0):.2f} sec**")
 
-    with st.expander("LLM Settings", expanded=False):
-        llm_col1, llm_col2 = st.columns(2)
+            transcript_file = Path(single_result.get("transcript_file", ""))
+            if transcript_file.exists():
+                render_transcript_preview(transcript_file, "transcription_single")
 
-        with llm_col1:
-            model = st.text_input("Ollama Model", value=DEFAULT_MODEL, key="metadata_model")
-            base_url = st.text_input("Base URL", value=DEFAULT_BASE_URL, key="metadata_base_url")
-            timeout = st.number_input("Timeout (sec)", min_value=1, value=DEFAULT_TIMEOUT, step=1, key="metadata_timeout")
-            retries = st.number_input("Retries", min_value=0, value=DEFAULT_RETRIES, step=1, key="metadata_retries")
+    # ----------------------------------------------
+    # Batch Media
+    # ----------------------------------------------
 
-        with llm_col2:
-            sleep_ms = st.number_input("Sleep Between Items (ms)", min_value=0, value=DEFAULT_SLEEP_MS, step=50, key="metadata_sleep_ms")
-            temperature = st.number_input("Temperature", min_value=0.0, max_value=2.0, value=float(DEFAULT_TEMPERATURE), step=0.1, key="metadata_temperature")
-            num_ctx = st.number_input("Context Window", min_value=256, value=DEFAULT_NUM_CTX, step=256, key="metadata_num_ctx")
-            num_predict = st.number_input("Max Output Tokens", min_value=64, value=DEFAULT_NUM_PREDICT, step=64, key="metadata_num_predict")
+    with t_batch:
+        st.subheader("Batch Media Transcription")
 
-        seed_text = st.text_input("Seed (optional)", value="", key="metadata_seed")
+        batch_manage_col1, batch_manage_col2, batch_manage_col3, batch_manage_col4 = st.columns(4)
 
-    if st.button("Generate Metadata Excel", key="generate_metadata_button"):
-        if selected_source_type is None or selected_source_path is None:
-            st.warning("Please select a valid input source first.")
-        else:
-            try:
-                seed_value = None
-                if seed_text.strip():
-                    seed_value = int(seed_text.strip())
+        with batch_manage_col1:
+            if st.button("Clear Audio Uploads", key="transcription_batch_clear_audio"):
+                removed = clear_files_in_folder(UPLOAD_AUDIO_DIR, AUDIO_EXTS | VIDEO_EXTS)
+                st.success(f"Removed {removed} audio file(s).")
 
-                custom_output_dir = resolve_metadata_output_dir_for_source(Path(selected_source_path))
+        with batch_manage_col2:
+            if st.button("Clear Video Uploads", key="transcription_batch_clear_video"):
+                removed = clear_files_in_folder(UPLOAD_VIDEO_DIR, VIDEO_EXTS)
+                st.success(f"Removed {removed} video file(s).")
 
-                with st.spinner("Generating metadata... this may take some time depending on the number of transcripts and your Ollama model."):
-                    result = run_metadata_generation(
-                        source_type=selected_source_type,
-                        source_path=selected_source_path,
-                        transcript_column=selected_transcript_column,
-                        filename_column=selected_filename_column,
-                        sheet_name=selected_sheet_name,
-                        output_name=output_name.strip() or None,
-                        output_dir=custom_output_dir,
-                        model=model.strip() or DEFAULT_MODEL,
-                        base_url=base_url.strip() or DEFAULT_BASE_URL,
-                        timeout=int(timeout),
-                        retries=int(retries),
-                        sleep_ms=int(sleep_ms),
-                        temperature=float(temperature),
-                        num_ctx=int(num_ctx),
-                        num_predict=int(num_predict),
-                        seed=seed_value,
+        with batch_manage_col3:
+            if st.button("Clear Transcript Files", key="transcription_batch_clear_transcripts"):
+                removed = clear_files_in_folder(TRANSCRIPT_DIR, {".txt", ".zip", ".json", ".xlsx"})
+                st.success(f"Removed {removed} transcript/export file(s).")
+
+        with batch_manage_col4:
+            if st.button("Clear All Generated Data", key="transcription_batch_clear_all"):
+                summary = clear_generated_project_data()
+                st.success(build_clear_summary_message(summary))
+
+        uploaded_batch_files = st.file_uploader(
+            "Upload audio or video files",
+            accept_multiple_files=True,
+            type=[
+                "mp3", "wav", "m4a", "flac", "ogg", "opus", "aac", "wma",
+                "mp4", "mkv", "mov", "avi", "webm",
+            ],
+            key="transcription_batch_media_uploader",
+        )
+
+        batch_action_col1, batch_action_col2 = st.columns(2)
+
+        with batch_action_col1:
+            if st.button("Save Uploaded Media Files", key="transcription_batch_save_files"):
+                if uploaded_batch_files:
+                    audio_count, video_count, _ = save_uploaded_files(uploaded_batch_files)
+                    st.success(f"Saved {len(uploaded_batch_files)} file(s) ({audio_count} audio, {video_count} video).")
+                else:
+                    st.warning("Please choose files first.")
+
+        with batch_action_col2:
+            if st.button("Start Batch Transcription", key="transcription_batch_start"):
+                try:
+                    with st.spinner("Standardizing and transcribing batch media..."):
+                        result = transcribe_batch_media()
+
+                    st.session_state["transcription_batch_result"] = result
+
+                    if result.get("ok", False):
+                        st.success("Batch transcription completed successfully.")
+                    else:
+                        st.error(result.get("error", "Batch transcription failed."))
+                except Exception as e:
+                    st.error(f"Error: {e}")
+
+        current_audio_files = get_audio_files(UPLOAD_AUDIO_DIR)
+        current_video_files = get_video_files(UPLOAD_VIDEO_DIR)
+
+        st.write(f"Audio files available: **{len(current_audio_files)}**")
+        st.write(f"Video files available: **{len(current_video_files)}**")
+
+        batch_result = st.session_state.get("transcription_batch_result")
+
+        if batch_result:
+            st.write(f"Audio files processed: **{batch_result.get('audio_file_count', 0)}**")
+            st.write(f"Video files processed: **{batch_result.get('video_file_count', 0)}**")
+            st.write(f"Standardize time: **{batch_result.get('standardize_time_sec', 0):.2f} sec**")
+            st.write(f"Transcription time: **{batch_result.get('transcription_time_sec', 0):.2f} sec**")
+
+            transcript_files = [Path(p) for p in batch_result.get("transcript_files", []) if Path(p).exists()]
+            if transcript_files:
+                zip_bytes = build_transcript_zip_bytes(transcript_files)
+
+                st.download_button(
+                    label="Download Batch Transcripts ZIP",
+                    data=zip_bytes,
+                    file_name="batch_transcripts.zip",
+                    mime="application/zip",
+                    key="transcription_batch_zip_download",
+                )
+
+                for transcript_file in transcript_files[:10]:
+                    with st.expander(transcript_file.name):
+                        st.text_area(
+                            "Transcript",
+                            value=read_text_file(transcript_file),
+                            height=250,
+                            key=f"transcription_batch_preview_{transcript_file.stem}",
+                        )
+
+    # ----------------------------------------------
+    # Playlist
+    # ----------------------------------------------
+
+    with t_playlist:
+        st.subheader("Playlist Download & Transcription")
+
+        render_playlist_management_ui("transcription_playlist_manage")
+
+        playlist_url = st.text_input("Paste YouTube Playlist Link", key="transcription_playlist_url")
+        playlist_quality = st.selectbox(
+            "Select Download Quality",
+            ["480p", "720p", "1080p"],
+            index=1,
+            key="transcription_playlist_quality",
+        )
+
+        if st.button("Download Playlist and Transcribe", key="transcription_playlist_button"):
+            if not playlist_url.strip():
+                st.warning("Please paste a playlist link first.")
+            else:
+                try:
+                    with st.spinner("Downloading playlist, standardizing audio, and transcribing..."):
+                        result = transcribe_playlist(
+                            playlist_url=playlist_url.strip(),
+                            quality=playlist_quality,
+                        )
+
+                    st.session_state["transcription_playlist_result"] = result
+
+                    if result.get("ok", False):
+                        st.success("Playlist transcription completed successfully.")
+                    else:
+                        st.error("Playlist transcription failed.")
+                except Exception as e:
+                    st.error(f"Error: {e}")
+
+        playlist_result = st.session_state.get("transcription_playlist_result")
+
+        if playlist_result:
+            manifest = playlist_result.get("manifest", {}) or {}
+            st.write(f"Playlist: **{manifest.get('playlist_title', 'Unknown')}**")
+            st.write(f"Videos found: **{manifest.get('entry_count', 0)}**")
+            st.write(f"Quality selected: **{playlist_result.get('quality', '')}**")
+            st.write(f"Download time: **{playlist_result.get('download_time_sec', 0):.2f} sec**")
+            st.write(f"Transcription time: **{playlist_result.get('transcription_time_sec', 0):.2f} sec**")
+
+            transcripts_dir = Path(playlist_result.get("transcripts_dir", ""))
+            playlist_slug = Path(playlist_result.get("playlist_root", "")).name
+
+            if transcripts_dir.exists():
+                zip_result = build_transcript_folder_zip_bytes(transcripts_dir)
+
+                st.download_button(
+                    label="Download Playlist Transcripts ZIP",
+                    data=zip_result["zip_bytes"],
+                    file_name=f"{playlist_slug}_transcripts.zip",
+                    mime="application/zip",
+                    key=f"playlist_txt_zip_{playlist_slug}",
+                )
+
+            playlist_detailed_excel = Path(playlist_result.get("playlist_excel_file", ""))
+            if playlist_detailed_excel.exists():
+                render_binary_download(
+                    playlist_detailed_excel,
+                    "Download Playlist Detailed Excel",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    f"playlist_detailed_excel_{playlist_slug}",
+                )
+
+            if playlist_slug:
+                try:
+                    playlist_struct_excel = export_playlist_transcripts_to_excel(playlist_slug)
+                    playlist_struct_json = export_playlist_transcripts_to_json(playlist_slug)
+
+                    excel_path = Path(playlist_struct_excel.get("output_file", ""))
+                    json_path = Path(playlist_struct_json.get("output_file", ""))
+
+                    export_col1, export_col2 = st.columns(2)
+
+                    with export_col1:
+                        render_binary_download(
+                            excel_path,
+                            "Download Transcript Excel",
+                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            f"playlist_struct_excel_{playlist_slug}",
+                        )
+
+                    with export_col2:
+                        render_binary_download(
+                            json_path,
+                            "Download Transcript JSON",
+                            "application/json",
+                            f"playlist_struct_json_{playlist_slug}",
+                        )
+                except Exception as e:
+                    st.warning(f"Could not prepare structured playlist transcript exports: {e}")
+
+            transcript_files = sorted(transcripts_dir.glob("*.txt")) if transcripts_dir.exists() else []
+            for transcript_file in transcript_files[:10]:
+                with st.expander(transcript_file.name):
+                    st.text_area(
+                        "Transcript",
+                        value=read_text_file(transcript_file),
+                        height=250,
+                        key=f"playlist_transcript_preview_{transcript_file.stem}",
                     )
 
-                st.session_state["metadata_last_result"] = result
-                st.success("Metadata generation completed.")
+    # ----------------------------------------------
+    # Transcript Exports
+    # ----------------------------------------------
 
+    with t_exports:
+        st.subheader("Transcript Exports")
+
+        export_col1, export_col2 = st.columns(2)
+
+        with export_col1:
+            if st.button("Clear Transcript Files", key="transcript_exports_clear_transcripts"):
+                removed = clear_files_in_folder(TRANSCRIPT_DIR, {".txt", ".zip", ".json", ".xlsx"})
+                st.success(f"Removed {removed} transcript/export file(s).")
+
+        with export_col2:
+            if st.button("Clear All Generated Data", key="transcript_exports_clear_all"):
+                summary = clear_generated_project_data()
+                st.success(build_clear_summary_message(summary))
+
+        global_transcripts = sorted(TRANSCRIPT_DIR.glob("*.txt"))
+
+        st.markdown("### Global Transcript Exports")
+
+        if global_transcripts:
+            try:
+                global_zip = build_global_transcripts_zip_bytes()
+                global_excel = export_global_transcripts_to_excel(TRANSCRIPT_DIR / "transcripts_export.xlsx")
+                global_json = export_global_transcripts_to_json(TRANSCRIPT_DIR / "transcripts_export.json")
+
+                gcol1, gcol2, gcol3 = st.columns(3)
+
+                with gcol1:
+                    st.download_button(
+                        label="Download TXT ZIP",
+                        data=global_zip["zip_bytes"],
+                        file_name="transcripts.zip",
+                        mime="application/zip",
+                        key="global_transcript_zip_download",
+                    )
+
+                with gcol2:
+                    render_binary_download(
+                        Path(global_excel.get("output_file", "")),
+                        "Download Excel",
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        "global_transcript_excel",
+                    )
+
+                with gcol3:
+                    render_binary_download(
+                        Path(global_json.get("output_file", "")),
+                        "Download JSON",
+                        "application/json",
+                        "global_transcript_json",
+                    )
+
+                with st.expander("Preview Global Transcripts", expanded=False):
+                    for transcript_file in global_transcripts[:10]:
+                        st.text_area(
+                            transcript_file.name,
+                            value=read_text_file(transcript_file),
+                            height=200,
+                            key=f"global_export_preview_{transcript_file.stem}",
+                        )
             except Exception as e:
-                st.error(f"Metadata generation failed: {e}")
+                st.error(f"Global transcript export failed: {e}")
+        else:
+            st.info("No transcript files found in the global transcript directory.")
 
-    last_result = st.session_state.get("metadata_last_result")
+        st.markdown("### Playlist Transcript Exports")
 
-    if last_result:
-        st.subheader("Last Metadata Run")
+        playlist_slugs = get_playlist_slugs()
 
-        st.write(f"Source type: **{last_result.get('source_type', '')}**")
-        st.write(f"Total items: **{last_result.get('total_items', 0)}**")
-        st.write(f"Successful items: **{last_result.get('success_count', 0)}**")
-        st.write(f"Items with errors: **{last_result.get('error_count', 0)}**")
-        st.write(f"Run folder: `{last_result.get('run_dir', '')}`")
+        if playlist_slugs:
+            selected_playlist_slug = st.selectbox(
+                "Select Playlist",
+                options=playlist_slugs,
+                key="transcript_exports_playlist_slug",
+            )
 
-        excel_output_path = Path(last_result.get("excel_output", ""))
-        ok_log_path = Path(last_result.get("ok_log", ""))
-        err_log_path = Path(last_result.get("err_log", ""))
+            if selected_playlist_slug:
+                try:
+                    playlist_zip_result = build_transcript_folder_zip_bytes(
+                        PLAYLISTS_DIR / selected_playlist_slug / "transcripts"
+                    )
+                    playlist_excel_result = export_playlist_transcripts_to_excel(selected_playlist_slug)
+                    playlist_json_result = export_playlist_transcripts_to_json(selected_playlist_slug)
 
-        download_col1, download_col2, download_col3 = st.columns(3)
+                    pcol1, pcol2, pcol3 = st.columns(3)
 
-        with download_col1:
-            if excel_output_path.exists():
+                    with pcol1:
+                        st.download_button(
+                            label="Download TXT ZIP",
+                            data=playlist_zip_result["zip_bytes"],
+                            file_name=f"{selected_playlist_slug}_transcripts.zip",
+                            mime="application/zip",
+                            key=f"playlist_export_zip_{selected_playlist_slug}",
+                        )
+
+                    with pcol2:
+                        render_binary_download(
+                            Path(playlist_excel_result.get("output_file", "")),
+                            "Download Excel",
+                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            f"playlist_export_excel_{selected_playlist_slug}",
+                        )
+
+                    with pcol3:
+                        render_binary_download(
+                            Path(playlist_json_result.get("output_file", "")),
+                            "Download JSON",
+                            "application/json",
+                            f"playlist_export_json_{selected_playlist_slug}",
+                        )
+                except Exception as e:
+                    st.error(f"Playlist transcript export failed: {e}")
+        else:
+            st.info("No playlist folders found yet.")
+
+# ==================================================
+# TAB 2 — METADATA / SEO
+# ==================================================
+
+with metadata_tab:
+    m_single, m_batch, m_playlist, m_existing = st.tabs([
+        "Single YouTube",
+        "Batch Inputs",
+        "Playlist",
+        "Existing Transcripts / Excel",
+    ])
+
+    # ----------------------------------------------
+    # Single YouTube
+    # ----------------------------------------------
+
+    with m_single:
+        st.subheader("Single YouTube → Transcript + Metadata")
+
+        single_meta_url = st.text_input("Paste YouTube Link", key="metadata_single_youtube_url")
+
+        with st.expander("LLM Settings", expanded=False):
+            llm_col1, llm_col2 = st.columns(2)
+
+            with llm_col1:
+                single_model = st.text_input("Ollama Model", value=DEFAULT_MODEL, key="metadata_single_model")
+                single_base_url = st.text_input("Base URL", value=DEFAULT_BASE_URL, key="metadata_single_base_url")
+                single_timeout = st.number_input("Timeout (sec)", min_value=1, value=DEFAULT_TIMEOUT, step=1, key="metadata_single_timeout")
+                single_retries = st.number_input("Retries", min_value=0, value=DEFAULT_RETRIES, step=1, key="metadata_single_retries")
+
+            with llm_col2:
+                single_sleep_ms = st.number_input("Sleep Between Items (ms)", min_value=0, value=DEFAULT_SLEEP_MS, step=50, key="metadata_single_sleep_ms")
+                single_temperature = st.number_input("Temperature", min_value=0.0, max_value=2.0, value=float(DEFAULT_TEMPERATURE), step=0.1, key="metadata_single_temperature")
+                single_num_ctx = st.number_input("Context Window", min_value=256, value=DEFAULT_NUM_CTX, step=256, key="metadata_single_num_ctx")
+                single_num_predict = st.number_input("Max Output Tokens", min_value=64, value=DEFAULT_NUM_PREDICT, step=64, key="metadata_single_num_predict")
+
+            single_seed_text = st.text_input("Seed (optional)", value="", key="metadata_single_seed")
+
+        if st.button("Generate Transcript + Metadata", key="metadata_single_youtube_button"):
+            if not single_meta_url.strip():
+                st.warning("Please paste a YouTube link first.")
+            else:
+                try:
+                    seed_value = int(single_seed_text.strip()) if single_seed_text.strip() else None
+
+                    with st.spinner("Downloading, transcribing, and generating metadata..."):
+                        result = generate_metadata_from_single_youtube(
+                            youtube_url=single_meta_url.strip(),
+                            model=single_model.strip() or DEFAULT_MODEL,
+                            base_url=single_base_url.strip() or DEFAULT_BASE_URL,
+                            timeout=int(single_timeout),
+                            retries=int(single_retries),
+                            sleep_ms=int(single_sleep_ms),
+                            temperature=float(single_temperature),
+                            num_ctx=int(single_num_ctx),
+                            num_predict=int(single_num_predict),
+                            seed=seed_value,
+                        )
+
+                    st.session_state["metadata_single_result"] = result
+
+                    if result.get("ok", False):
+                        st.success("Transcript and metadata generation completed successfully.")
+                    else:
+                        st.error(result.get("error", "Metadata generation failed."))
+                except Exception as e:
+                    st.error(f"Error: {e}")
+
+        single_meta_result = st.session_state.get("metadata_single_result")
+
+        if single_meta_result:
+            transcription_result = single_meta_result.get("transcription", {}) or {}
+            transcript_file = Path(single_meta_result.get("transcript_file", ""))
+
+            st.write(f"Download time: **{transcription_result.get('download_time_sec', 0):.2f} sec**")
+            st.write(f"Standardize time: **{transcription_result.get('standardize_time_sec', 0):.2f} sec**")
+            st.write(f"Transcription time: **{transcription_result.get('transcription_time_sec', 0):.2f} sec**")
+
+            if transcript_file.exists():
+                render_transcript_preview(transcript_file, "metadata_single")
+
+            render_metadata_outputs(single_meta_result.get("metadata", {}) or {}, "metadata_single_outputs")
+
+    # ----------------------------------------------
+    # Batch Inputs
+    # ----------------------------------------------
+
+    with m_batch:
+        st.subheader("Batch Inputs → Metadata")
+
+        batch_mode = st.radio(
+            "Batch Input Type",
+            ["Media Files", "Transcript TXT Files"],
+            horizontal=True,
+            key="metadata_batch_mode",
+        )
+
+        with st.expander("LLM Settings", expanded=False):
+            batch_llm_col1, batch_llm_col2 = st.columns(2)
+
+            with batch_llm_col1:
+                batch_model = st.text_input("Ollama Model", value=DEFAULT_MODEL, key="metadata_batch_model")
+                batch_base_url = st.text_input("Base URL", value=DEFAULT_BASE_URL, key="metadata_batch_base_url")
+                batch_timeout = st.number_input("Timeout (sec)", min_value=1, value=DEFAULT_TIMEOUT, step=1, key="metadata_batch_timeout")
+                batch_retries = st.number_input("Retries", min_value=0, value=DEFAULT_RETRIES, step=1, key="metadata_batch_retries")
+
+            with batch_llm_col2:
+                batch_sleep_ms = st.number_input("Sleep Between Items (ms)", min_value=0, value=DEFAULT_SLEEP_MS, step=50, key="metadata_batch_sleep_ms")
+                batch_temperature = st.number_input("Temperature", min_value=0.0, max_value=2.0, value=float(DEFAULT_TEMPERATURE), step=0.1, key="metadata_batch_temperature")
+                batch_num_ctx = st.number_input("Context Window", min_value=256, value=DEFAULT_NUM_CTX, step=256, key="metadata_batch_num_ctx")
+                batch_num_predict = st.number_input("Max Output Tokens", min_value=64, value=DEFAULT_NUM_PREDICT, step=64, key="metadata_batch_num_predict")
+
+            batch_seed_text = st.text_input("Seed (optional)", value="", key="metadata_batch_seed")
+
+        if batch_mode == "Media Files":
+            media_manage_col1, media_manage_col2, media_manage_col3 = st.columns(3)
+
+            with media_manage_col1:
+                if st.button("Clear Upload Audio", key="metadata_batch_media_clear_audio"):
+                    removed = clear_files_in_folder(UPLOAD_AUDIO_DIR, AUDIO_EXTS | VIDEO_EXTS)
+                    st.success(f"Removed {removed} audio file(s).")
+
+            with media_manage_col2:
+                if st.button("Clear Upload Video", key="metadata_batch_media_clear_video"):
+                    removed = clear_files_in_folder(UPLOAD_VIDEO_DIR, VIDEO_EXTS)
+                    st.success(f"Removed {removed} video file(s).")
+
+            with media_manage_col3:
+                if st.button("Clear Generated Metadata", key="metadata_batch_media_clear_metadata"):
+                    removed_files, removed_dirs = clear_folder_contents(METADATA_BATCH_DIR)
+                    st.success(f"Removed {removed_dirs} folder(s) and {removed_files} file(s).")
+
+            uploaded_meta_media_files = st.file_uploader(
+                "Upload audio or video files",
+                accept_multiple_files=True,
+                type=[
+                    "mp3", "wav", "m4a", "flac", "ogg", "opus", "aac", "wma",
+                    "mp4", "mkv", "mov", "avi", "webm",
+                ],
+                key="metadata_batch_media_uploader",
+            )
+
+            st.write(f"Current upload audio files: **{len(get_audio_files(UPLOAD_AUDIO_DIR))}**")
+            st.write(f"Current upload video files: **{len(get_video_files(UPLOAD_VIDEO_DIR))}**")
+
+            if st.button("Generate Metadata from Uploaded Media Files", key="metadata_batch_media_button"):
+                if not uploaded_meta_media_files:
+                    st.warning("Please upload media files first.")
+                else:
+                    try:
+                        seed_value = int(batch_seed_text.strip()) if batch_seed_text.strip() else None
+
+                        clear_files_in_folder(UPLOAD_AUDIO_DIR, AUDIO_EXTS | VIDEO_EXTS)
+                        clear_files_in_folder(UPLOAD_VIDEO_DIR, VIDEO_EXTS)
+
+                        save_uploaded_files(uploaded_meta_media_files)
+
+                        with st.spinner("Standardizing, transcribing, and generating metadata..."):
+                            result = generate_metadata_from_batch_media(
+                                model=batch_model.strip() or DEFAULT_MODEL,
+                                base_url=batch_base_url.strip() or DEFAULT_BASE_URL,
+                                timeout=int(batch_timeout),
+                                retries=int(batch_retries),
+                                sleep_ms=int(batch_sleep_ms),
+                                temperature=float(batch_temperature),
+                                num_ctx=int(batch_num_ctx),
+                                num_predict=int(batch_num_predict),
+                                seed=seed_value,
+                            )
+
+                        st.session_state["metadata_batch_result"] = result
+
+                        if result.get("ok", False):
+                            st.success("Batch media metadata generation completed successfully.")
+                        else:
+                            st.error(result.get("error", "Batch media metadata generation failed."))
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+
+        else:
+            transcript_upload_dir = METADATA_BATCH_DIR / "uploaded_txt_inputs"
+            uploaded_meta_txt_files = st.file_uploader(
+                "Upload transcript TXT files",
+                accept_multiple_files=True,
+                type=["txt"],
+                key="metadata_batch_txt_uploader",
+            )
+
+            if st.button("Generate Metadata from Uploaded Transcript Files", key="metadata_batch_txt_button"):
+                if not uploaded_meta_txt_files:
+                    st.warning("Please upload transcript TXT files first.")
+                else:
+                    try:
+                        seed_value = int(batch_seed_text.strip()) if batch_seed_text.strip() else None
+
+                        saved_paths = save_uploaded_transcript_files(uploaded_meta_txt_files, transcript_upload_dir)
+
+                        with st.spinner("Generating metadata from transcript files..."):
+                            result = generate_metadata_from_transcript_files(
+                                transcript_files=saved_paths,
+                                output_name="uploaded_transcript_files",
+                                metadata_output_dir=METADATA_BATCH_DIR,
+                                model=batch_model.strip() or DEFAULT_MODEL,
+                                base_url=batch_base_url.strip() or DEFAULT_BASE_URL,
+                                timeout=int(batch_timeout),
+                                retries=int(batch_retries),
+                                sleep_ms=int(batch_sleep_ms),
+                                temperature=float(batch_temperature),
+                                num_ctx=int(batch_num_ctx),
+                                num_predict=int(batch_num_predict),
+                                seed=seed_value,
+                            )
+
+                        st.session_state["metadata_batch_result"] = result
+
+                        if result.get("ok", False):
+                            st.success("Metadata generated successfully from transcript files.")
+                        else:
+                            st.error(result.get("error", "Metadata generation failed."))
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+
+        batch_meta_result = st.session_state.get("metadata_batch_result")
+
+        if batch_meta_result:
+            transcript_files_used = [Path(p) for p in batch_meta_result.get("transcript_files_used", []) if Path(p).exists()]
+            if transcript_files_used:
+                zip_bytes = build_transcript_zip_bytes(transcript_files_used)
+
                 st.download_button(
-                    label="Download Metadata Excel",
-                    data=excel_output_path.read_bytes(),
-                    file_name=excel_output_path.name,
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key="download_metadata_excel"
+                    label="Download Used Transcript TXT ZIP",
+                    data=zip_bytes,
+                    file_name="batch_used_transcripts.zip",
+                    mime="application/zip",
+                    key="metadata_batch_used_transcripts_zip",
                 )
 
-        with download_col2:
-            if ok_log_path.exists():
+            render_metadata_outputs(batch_meta_result.get("metadata", {}) or {}, "metadata_batch_outputs")
+
+    # ----------------------------------------------
+    # Playlist
+    # ----------------------------------------------
+
+    with m_playlist:
+        st.subheader("Playlist → Transcript + Metadata")
+
+        render_playlist_management_ui("metadata_playlist_manage")
+
+        metadata_playlist_url = st.text_input("Paste YouTube Playlist Link", key="metadata_playlist_url")
+        metadata_playlist_quality = st.selectbox(
+            "Select Download Quality",
+            ["480p", "720p", "1080p"],
+            index=1,
+            key="metadata_playlist_quality",
+        )
+
+        with st.expander("LLM Settings", expanded=False):
+            playlist_llm_col1, playlist_llm_col2 = st.columns(2)
+
+            with playlist_llm_col1:
+                playlist_model = st.text_input("Ollama Model", value=DEFAULT_MODEL, key="metadata_playlist_model")
+                playlist_base_url = st.text_input("Base URL", value=DEFAULT_BASE_URL, key="metadata_playlist_base_url")
+                playlist_timeout = st.number_input("Timeout (sec)", min_value=1, value=DEFAULT_TIMEOUT, step=1, key="metadata_playlist_timeout")
+                playlist_retries = st.number_input("Retries", min_value=0, value=DEFAULT_RETRIES, step=1, key="metadata_playlist_retries")
+
+            with playlist_llm_col2:
+                playlist_sleep_ms = st.number_input("Sleep Between Items (ms)", min_value=0, value=DEFAULT_SLEEP_MS, step=50, key="metadata_playlist_sleep_ms")
+                playlist_temperature = st.number_input("Temperature", min_value=0.0, max_value=2.0, value=float(DEFAULT_TEMPERATURE), step=0.1, key="metadata_playlist_temperature")
+                playlist_num_ctx = st.number_input("Context Window", min_value=256, value=DEFAULT_NUM_CTX, step=256, key="metadata_playlist_num_ctx")
+                playlist_num_predict = st.number_input("Max Output Tokens", min_value=64, value=DEFAULT_NUM_PREDICT, step=64, key="metadata_playlist_num_predict")
+
+            playlist_seed_text = st.text_input("Seed (optional)", value="", key="metadata_playlist_seed")
+
+        if st.button("Generate Playlist Transcript + Metadata", key="metadata_playlist_button"):
+            if not metadata_playlist_url.strip():
+                st.warning("Please paste a playlist link first.")
+            else:
+                try:
+                    seed_value = int(playlist_seed_text.strip()) if playlist_seed_text.strip() else None
+
+                    with st.spinner("Downloading playlist, transcribing, and generating metadata..."):
+                        result = generate_metadata_from_playlist(
+                            playlist_url=metadata_playlist_url.strip(),
+                            quality=metadata_playlist_quality,
+                            model=playlist_model.strip() or DEFAULT_MODEL,
+                            base_url=playlist_base_url.strip() or DEFAULT_BASE_URL,
+                            timeout=int(playlist_timeout),
+                            retries=int(playlist_retries),
+                            sleep_ms=int(playlist_sleep_ms),
+                            temperature=float(playlist_temperature),
+                            num_ctx=int(playlist_num_ctx),
+                            num_predict=int(playlist_num_predict),
+                            seed=seed_value,
+                        )
+
+                    st.session_state["metadata_playlist_result"] = result
+
+                    if result.get("ok", False):
+                        st.success("Playlist metadata generation completed successfully.")
+                    else:
+                        st.error(result.get("error", "Playlist metadata generation failed."))
+                except Exception as e:
+                    st.error(f"Error: {e}")
+
+        metadata_playlist_result = st.session_state.get("metadata_playlist_result")
+
+        if metadata_playlist_result:
+            transcription_result = metadata_playlist_result.get("transcription", {}) or {}
+            manifest = transcription_result.get("manifest", {}) or {}
+            transcripts_dir = Path(metadata_playlist_result.get("transcripts_dir", ""))
+
+            st.write(f"Playlist: **{manifest.get('playlist_title', 'Unknown')}**")
+            st.write(f"Videos found: **{manifest.get('entry_count', 0)}**")
+            st.write(f"Quality selected: **{transcription_result.get('quality', '')}**")
+            st.write(f"Download time: **{transcription_result.get('download_time_sec', 0):.2f} sec**")
+            st.write(f"Transcription time: **{transcription_result.get('transcription_time_sec', 0):.2f} sec**")
+
+            if transcripts_dir.exists():
+                zip_result = build_transcript_folder_zip_bytes(transcripts_dir)
                 st.download_button(
-                    label="Download OK Log",
-                    data=ok_log_path.read_bytes(),
-                    file_name=ok_log_path.name,
-                    mime="text/tab-separated-values",
-                    key="download_metadata_ok_log"
+                    label="Download Playlist Transcript TXT ZIP",
+                    data=zip_result["zip_bytes"],
+                    file_name=f"{Path(transcription_result.get('playlist_root', '')).name}_transcripts.zip",
+                    mime="application/zip",
+                    key="metadata_playlist_txt_zip",
                 )
 
-        with download_col3:
-            if err_log_path.exists():
-                st.download_button(
-                    label="Download Error Log",
-                    data=err_log_path.read_bytes(),
-                    file_name=err_log_path.name,
-                    mime="text/tab-separated-values",
-                    key="download_metadata_err_log"
+            playlist_detailed_excel = Path(metadata_playlist_result.get("playlist_excel", ""))
+            if playlist_detailed_excel.exists():
+                render_binary_download(
+                    playlist_detailed_excel,
+                    "Download Playlist Detailed Excel",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    "metadata_playlist_detailed_excel",
                 )
 
-        if last_result.get("error_count", 0) > 0:
-            st.warning("Some items failed during the Ollama call or returned invalid JSON. Check the error log for details.")
+            render_metadata_outputs(metadata_playlist_result.get("metadata", {}) or {}, "metadata_playlist_outputs")
 
-        rows = last_result.get("rows", [])
-        if rows:
-            with st.expander("Preview Generated Metadata", expanded=True):
-                st.dataframe(rows, use_container_width=True)
+    # ----------------------------------------------
+    # Existing Transcripts / Excel
+    # ----------------------------------------------
+
+    with m_existing:
+        st.subheader("Existing Transcripts / Excel → Metadata Only")
+
+        existing_mode = st.radio(
+            "Input Type",
+            ["Single TXT", "Transcript Folder", "Excel File"],
+            horizontal=True,
+            key="metadata_existing_mode",
+        )
+
+        selected_transcript_file = None
+        selected_transcript_folder = None
+        selected_excel_path = None
+        selected_sheet_name = None
+        selected_transcript_column = None
+        selected_filename_column = None
+
+        if existing_mode == "Single TXT":
+            single_txt_mode = st.radio(
+                "Transcript Source",
+                ["Existing Generated Transcript", "Upload TXT File"],
+                horizontal=True,
+                key="metadata_existing_single_mode",
+            )
+
+            if single_txt_mode == "Existing Generated Transcript":
+                transcript_files = get_all_transcript_files()
+
+                if not transcript_files:
+                    st.info("No transcript files found in the app output folders.")
+                else:
+                    file_options = [str(p) for p in transcript_files]
+
+                    selected_file_str = st.selectbox(
+                        "Select Transcript File",
+                        options=file_options,
+                        format_func=lambda p: format_path_for_display(Path(p)),
+                        key="metadata_existing_single_select",
+                    )
+
+                    selected_transcript_file = Path(selected_file_str)
+
+            else:
+                uploaded_txt = st.file_uploader(
+                    "Upload Transcript TXT File",
+                    type=["txt"],
+                    key="metadata_existing_single_upload",
+                )
+
+                if uploaded_txt is not None:
+                    selected_transcript_file = save_uploaded_file(
+                        uploaded_txt,
+                        METADATA_SINGLE_DIR / "uploaded_txt_inputs",
+                    )
+                    st.success(f"Uploaded transcript saved: {selected_transcript_file.name}")
+
+        elif existing_mode == "Transcript Folder":
+            transcript_folders = get_transcript_source_folders()
+
+            if not transcript_folders:
+                st.info("No transcript folders found.")
+            else:
+                folder_options = [str(p) for p in transcript_folders]
+
+                selected_folder_str = st.selectbox(
+                    "Select Transcript Folder",
+                    options=folder_options,
+                    format_func=lambda p: format_path_for_display(Path(p)),
+                    key="metadata_existing_folder_select",
+                )
+
+                selected_transcript_folder = Path(selected_folder_str)
+
+                txt_count = len(list(selected_transcript_folder.glob("*.txt")))
+                st.write(f"Transcript files found: **{txt_count}**")
+
+        else:
+            excel_input_mode = st.radio(
+                "Excel Source",
+                ["Existing Generated Excel File", "Upload Excel File"],
+                horizontal=True,
+                key="metadata_existing_excel_mode",
+            )
+
+            if excel_input_mode == "Existing Generated Excel File":
+                excel_files = get_existing_excel_sources()
+
+                if not excel_files:
+                    st.info("No Excel files found.")
+                else:
+                    excel_options = [str(p) for p in excel_files]
+
+                    selected_excel_str = st.selectbox(
+                        "Select Excel File",
+                        options=excel_options,
+                        format_func=lambda p: format_path_for_display(Path(p)),
+                        key="metadata_existing_excel_select",
+                    )
+
+                    selected_excel_path = Path(selected_excel_str)
+            else:
+                uploaded_excel = st.file_uploader(
+                    "Upload Excel File",
+                    type=["xlsx", "xlsm"],
+                    key="metadata_existing_excel_upload",
+                )
+
+                if uploaded_excel is not None:
+                    selected_excel_path = save_uploaded_excel(uploaded_excel)
+                    st.success(f"Uploaded Excel saved: {selected_excel_path.name}")
+
+            if selected_excel_path:
+                try:
+                    sheet_names = get_excel_sheet_names(selected_excel_path)
+
+                    if sheet_names:
+                        selected_sheet_name = st.selectbox(
+                            "Select Sheet",
+                            options=sheet_names,
+                            key="metadata_existing_excel_sheet",
+                        )
+
+                        columns = get_excel_columns(selected_excel_path, selected_sheet_name)
+
+                        if columns:
+                            lower_columns = [c.strip().lower() for c in columns]
+                            transcript_default_index = lower_columns.index("transcription") if "transcription" in lower_columns else 0
+
+                            selected_transcript_column = st.selectbox(
+                                "Transcript Column",
+                                options=columns,
+                                index=transcript_default_index,
+                                key="metadata_existing_excel_transcript_column",
+                            )
+
+                            filename_options = ["(auto-generate row names)"] + columns
+                            filename_default_index = lower_columns.index("title") + 1 if "title" in lower_columns else 0
+
+                            filename_choice = st.selectbox(
+                                "Filename Column (optional)",
+                                options=filename_options,
+                                index=filename_default_index,
+                                key="metadata_existing_excel_filename_column",
+                            )
+
+                            if filename_choice != "(auto-generate row names)":
+                                selected_filename_column = filename_choice
+
+                except Exception as e:
+                    st.error(f"Failed to inspect Excel file: {e}")
+
+        with st.expander("LLM Settings", expanded=False):
+            existing_llm_col1, existing_llm_col2 = st.columns(2)
+
+            with existing_llm_col1:
+                existing_model = st.text_input("Ollama Model", value=DEFAULT_MODEL, key="metadata_existing_model")
+                existing_base_url = st.text_input("Base URL", value=DEFAULT_BASE_URL, key="metadata_existing_base_url")
+                existing_timeout = st.number_input("Timeout (sec)", min_value=1, value=DEFAULT_TIMEOUT, step=1, key="metadata_existing_timeout")
+                existing_retries = st.number_input("Retries", min_value=0, value=DEFAULT_RETRIES, step=1, key="metadata_existing_retries")
+
+            with existing_llm_col2:
+                existing_sleep_ms = st.number_input("Sleep Between Items (ms)", min_value=0, value=DEFAULT_SLEEP_MS, step=50, key="metadata_existing_sleep_ms")
+                existing_temperature = st.number_input("Temperature", min_value=0.0, max_value=2.0, value=float(DEFAULT_TEMPERATURE), step=0.1, key="metadata_existing_temperature")
+                existing_num_ctx = st.number_input("Context Window", min_value=256, value=DEFAULT_NUM_CTX, step=256, key="metadata_existing_num_ctx")
+                existing_num_predict = st.number_input("Max Output Tokens", min_value=64, value=DEFAULT_NUM_PREDICT, step=64, key="metadata_existing_num_predict")
+
+            existing_seed_text = st.text_input("Seed (optional)", value="", key="metadata_existing_seed")
+
+        if st.button("Generate Metadata", key="metadata_existing_generate_button"):
+            try:
+                seed_value = int(existing_seed_text.strip()) if existing_seed_text.strip() else None
+
+                with st.spinner("Generating metadata..."):
+                    if existing_mode == "Single TXT":
+                        if selected_transcript_file is None:
+                            st.warning("Please choose or upload a transcript file first.")
+                        else:
+                            result = generate_metadata_from_single_transcript_file(
+                                transcript_file=selected_transcript_file,
+                                model=existing_model.strip() or DEFAULT_MODEL,
+                                base_url=existing_base_url.strip() or DEFAULT_BASE_URL,
+                                timeout=int(existing_timeout),
+                                retries=int(existing_retries),
+                                sleep_ms=int(existing_sleep_ms),
+                                temperature=float(existing_temperature),
+                                num_ctx=int(existing_num_ctx),
+                                num_predict=int(existing_num_predict),
+                                seed=seed_value,
+                            )
+                            st.session_state["metadata_existing_result"] = result
+
+                    elif existing_mode == "Transcript Folder":
+                        if selected_transcript_folder is None:
+                            st.warning("Please select a transcript folder first.")
+                        else:
+                            result = generate_metadata_from_transcript_folder(
+                                transcript_folder=selected_transcript_folder,
+                                model=existing_model.strip() or DEFAULT_MODEL,
+                                base_url=existing_base_url.strip() or DEFAULT_BASE_URL,
+                                timeout=int(existing_timeout),
+                                retries=int(existing_retries),
+                                sleep_ms=int(existing_sleep_ms),
+                                temperature=float(existing_temperature),
+                                num_ctx=int(existing_num_ctx),
+                                num_predict=int(existing_num_predict),
+                                seed=seed_value,
+                            )
+                            st.session_state["metadata_existing_result"] = result
+
+                    else:
+                        if selected_excel_path is None or not selected_transcript_column:
+                            st.warning("Please choose an Excel file and transcript column first.")
+                        else:
+                            result = generate_metadata_from_excel(
+                                excel_file=selected_excel_path,
+                                transcript_column=selected_transcript_column,
+                                filename_column=selected_filename_column,
+                                sheet_name=selected_sheet_name,
+                                model=existing_model.strip() or DEFAULT_MODEL,
+                                base_url=existing_base_url.strip() or DEFAULT_BASE_URL,
+                                timeout=int(existing_timeout),
+                                retries=int(existing_retries),
+                                sleep_ms=int(existing_sleep_ms),
+                                temperature=float(existing_temperature),
+                                num_ctx=int(existing_num_ctx),
+                                num_predict=int(existing_num_predict),
+                                seed=seed_value,
+                            )
+                            st.session_state["metadata_existing_result"] = result
+
+                existing_result = st.session_state.get("metadata_existing_result")
+                if existing_result:
+                    if existing_result.get("ok", False):
+                        st.success("Metadata generation completed successfully.")
+                    else:
+                        st.error(existing_result.get("error", "Metadata generation failed."))
+            except Exception as e:
+                st.error(f"Error: {e}")
+
+        existing_result = st.session_state.get("metadata_existing_result")
+        if existing_result:
+            render_metadata_outputs(existing_result.get("metadata", {}) or existing_result, "metadata_existing_outputs")
