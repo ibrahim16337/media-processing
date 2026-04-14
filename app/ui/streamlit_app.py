@@ -667,11 +667,13 @@ with transcription_tab:
                 st.warning("Please paste a playlist link first.")
             else:
                 try:
-                    with st.spinner("Downloading playlist, standardizing audio, and transcribing..."):
-                        result = transcribe_playlist(
-                            playlist_url=playlist_url.strip(),
-                            quality=playlist_quality,
-                        )
+                    progress_callback = create_progress_reporter("transcription_playlist")
+
+                    result = transcribe_playlist(
+                        playlist_url=playlist_url.strip(),
+                        quality=playlist_quality,
+                        progress_callback=progress_callback,
+                    )
 
                     st.session_state["transcription_playlist_result"] = result
 
