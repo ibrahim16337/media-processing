@@ -16,6 +16,9 @@ from app.config.paths import (
 from app.pipelines.export_pipeline.transcript_excel_exporter import (
     export_transcript_excel,
 )
+from app.pipelines.export_pipeline.transcript_json_exporter import (
+    export_transcript_json,
+)
 
 
 CANDIDATE_ENCODINGS = [
@@ -243,7 +246,31 @@ def export_transcript_files_to_excel(
 
     return {
         "ok": True,
-        "mode": "transcript_files_export",
+        "mode": "transcript_files_export_excel",
+        "row_count": len(rows),
+        "rows": rows,
+        "output_file": str(output_path),
+    }
+
+
+def export_transcript_files_to_json(
+    transcript_files: Sequence[str | Path],
+    output_file: str | Path,
+    media_lookup_dirs: Sequence[str | Path] | None = None,
+) -> dict[str, Any]:
+    rows = build_transcript_rows(
+        transcript_files=transcript_files,
+        media_lookup_dirs=media_lookup_dirs,
+    )
+
+    output_path = export_transcript_json(
+        rows=rows,
+        output_file=output_file,
+    )
+
+    return {
+        "ok": True,
+        "mode": "transcript_files_export_json",
         "row_count": len(rows),
         "rows": rows,
         "output_file": str(output_path),
@@ -275,7 +302,39 @@ def export_transcript_folder_to_excel(
 
     return {
         "ok": True,
-        "mode": "transcript_folder_export",
+        "mode": "transcript_folder_export_excel",
+        "transcript_folder": str(folder),
+        "transcript_count": len(transcript_files),
+        "row_count": len(rows),
+        "rows": rows,
+        "output_file": str(output_path),
+    }
+
+
+def export_transcript_folder_to_json(
+    transcript_folder: str | Path,
+    output_file: str | Path,
+    media_lookup_dirs: Sequence[str | Path] | None = None,
+) -> dict[str, Any]:
+    folder = Path(transcript_folder)
+    if not folder.exists() or not folder.is_dir():
+        raise FileNotFoundError(f"Transcript folder not found: {folder}")
+
+    transcript_files = _find_transcript_files(folder)
+
+    rows = build_transcript_rows(
+        transcript_files=transcript_files,
+        media_lookup_dirs=media_lookup_dirs,
+    )
+
+    output_path = export_transcript_json(
+        rows=rows,
+        output_file=output_file,
+    )
+
+    return {
+        "ok": True,
+        "mode": "transcript_folder_export_json",
         "transcript_folder": str(folder),
         "transcript_count": len(transcript_files),
         "row_count": len(rows),
@@ -296,6 +355,19 @@ def export_global_transcripts_to_excel(
         output_file=output_file,
         media_lookup_dirs=[audio_dir, video_dir],
         sheet_name=sheet_name,
+    )
+
+
+def export_global_transcripts_to_json(
+    output_file: str | Path,
+    transcript_dir: Path = TRANSCRIPT_DIR,
+    audio_dir: Path = UPLOAD_AUDIO_DIR,
+    video_dir: Path = UPLOAD_VIDEO_DIR,
+) -> dict[str, Any]:
+    return export_transcript_folder_to_json(
+        transcript_folder=transcript_dir,
+        output_file=output_file,
+        media_lookup_dirs=[audio_dir, video_dir],
     )
 
 
@@ -322,6 +394,30 @@ def export_playlist_transcripts_to_excel(
         output_file=output_file,
         media_lookup_dirs=[audio_dir, videos_dir],
         sheet_name=sheet_name,
+    )
+
+
+def export_playlist_transcripts_to_json(
+    playlist_slug: str,
+    output_file: str | Path | None = None,
+) -> dict[str, Any]:
+    playlist_slug = _safe_string(playlist_slug)
+    if not playlist_slug:
+        raise ValueError("playlist_slug is required.")
+
+    playlist_root = PLAYLISTS_DIR / playlist_slug
+    transcripts_dir = playlist_root / "transcripts"
+    audio_dir = playlist_root / "audio"
+    videos_dir = playlist_root / "videos"
+    metadata_dir = playlist_root / "metadata"
+
+    if output_file is None:
+        output_file = metadata_dir / f"{playlist_slug}_transcripts.json"
+
+    return export_transcript_folder_to_json(
+        transcript_folder=transcripts_dir,
+        output_file=output_file,
+        media_lookup_dirs=[audio_dir, videos_dir],
     )
 
 
