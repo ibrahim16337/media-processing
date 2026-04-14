@@ -1032,18 +1032,20 @@ with metadata_tab:
 
                         save_uploaded_files(uploaded_meta_media_files)
 
-                        with st.spinner("Standardizing, transcribing, and generating metadata..."):
-                            result = generate_metadata_from_batch_media(
-                                model=batch_model.strip() or DEFAULT_MODEL,
-                                base_url=batch_base_url.strip() or DEFAULT_BASE_URL,
-                                timeout=int(batch_timeout),
-                                retries=int(batch_retries),
-                                sleep_ms=int(batch_sleep_ms),
-                                temperature=float(batch_temperature),
-                                num_ctx=int(batch_num_ctx),
-                                num_predict=int(batch_num_predict),
-                                seed=seed_value,
-                            )
+                        progress_callback = create_progress_reporter("metadata_batch_media")
+
+                        result = generate_metadata_from_batch_media(
+                            model=batch_model.strip() or DEFAULT_MODEL,
+                            base_url=batch_base_url.strip() or DEFAULT_BASE_URL,
+                            timeout=int(batch_timeout),
+                            retries=int(batch_retries),
+                            sleep_ms=int(batch_sleep_ms),
+                            temperature=float(batch_temperature),
+                            num_ctx=int(batch_num_ctx),
+                            num_predict=int(batch_num_predict),
+                            seed=seed_value,
+                            progress_callback=progress_callback,
+                        )
 
                         st.session_state["metadata_batch_result"] = result
 
@@ -1154,21 +1156,22 @@ with metadata_tab:
             else:
                 try:
                     seed_value = int(playlist_seed_text.strip()) if playlist_seed_text.strip() else None
+                    progress_callback = create_progress_reporter("metadata_playlist")
 
-                    with st.spinner("Downloading playlist, transcribing, and generating metadata..."):
-                        result = generate_metadata_from_playlist(
-                            playlist_url=metadata_playlist_url.strip(),
-                            quality=metadata_playlist_quality,
-                            model=playlist_model.strip() or DEFAULT_MODEL,
-                            base_url=playlist_base_url.strip() or DEFAULT_BASE_URL,
-                            timeout=int(playlist_timeout),
-                            retries=int(playlist_retries),
-                            sleep_ms=int(playlist_sleep_ms),
-                            temperature=float(playlist_temperature),
-                            num_ctx=int(playlist_num_ctx),
-                            num_predict=int(playlist_num_predict),
-                            seed=seed_value,
-                        )
+                    result = generate_metadata_from_playlist(
+                        playlist_url=metadata_playlist_url.strip(),
+                        quality=metadata_playlist_quality,
+                        model=playlist_model.strip() or DEFAULT_MODEL,
+                        base_url=playlist_base_url.strip() or DEFAULT_BASE_URL,
+                        timeout=int(playlist_timeout),
+                        retries=int(playlist_retries),
+                        sleep_ms=int(playlist_sleep_ms),
+                        temperature=float(playlist_temperature),
+                        num_ctx=int(playlist_num_ctx),
+                        num_predict=int(playlist_num_predict),
+                        seed=seed_value,
+                        progress_callback=progress_callback,
+                    )
 
                     st.session_state["metadata_playlist_result"] = result
 

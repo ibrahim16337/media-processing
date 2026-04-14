@@ -305,19 +305,26 @@ def generate_metadata_from_batch_media(
     num_ctx: int = DEFAULT_NUM_CTX,
     num_predict: int = DEFAULT_NUM_PREDICT,
     seed: int | None = None,
+    progress_callback: ProgressCallback = None,
 ) -> dict[str, Any]:
     start_time = time.time()
 
-    transcription_result = transcribe_batch_media()
+    def transcription_progress_bridge(event: dict[str, Any]) -> None:
+        raw_percent = float(event.get("percent", 0))
+        mapped_percent = (raw_percent / 100.0) * 55.0
 
-    if not transcription_result.get("ok", False):
-        return {
-            "ok": False,
-            "mode": "batch_media_metadata",
-            "transcription": transcription_result,
-            "metadata": None,
-            "error": transcription_result.get("error", "Batch transcription failed."),
-        }
+        _emit_progress(
+            progress_callback,
+            stage=event.get("stage", "transcription"),
+            percent=mapped_percent,
+            message=_safe_string(event.get("message", "")),
+            current=event.get("current"),
+            total=event.get("total"),
+        )
+
+    transcription_result = transcribe_batch_media(
+        progress_callback=transcription_progress_bridge,
+    )
 
     transcript_files = transcription_result.get("transcript_files", []) or []
     recent_transcript_files = _filter_recent_files(transcript_files, start_time)
@@ -338,6 +345,21 @@ def generate_metadata_from_batch_media(
     staged_transcripts_dir = workspace / "transcripts"
     staged_files = _copy_files_to_folder(recent_transcript_files, staged_transcripts_dir)
 
+    
+    def metadata_progress_bridge(event: dict[str, Any]) -> None:
+        raw_percent = float(event.get("percent", 0))
+        mapped_percent = 55.0 + ((raw_percent / 100.0) * 45.0)
+
+        _emit_progress(
+            progress_callback,
+            stage=event.get("stage", "metadata"),
+            percent=mapped_percent,
+            message=_safe_string(event.get("message", "")),
+            current=event.get("current"),
+            total=event.get("total"),
+        )
+    
+    
     metadata_result = _run_metadata_only(
         source_type="folder",
         source_path=staged_transcripts_dir,
@@ -352,6 +374,7 @@ def generate_metadata_from_batch_media(
         num_ctx=num_ctx,
         num_predict=num_predict,
         seed=seed,
+        progress_callback=metadata_progress_bridge,
     )
 
     return {
@@ -380,13 +403,28 @@ def generate_metadata_from_playlist(
     num_ctx: int = DEFAULT_NUM_CTX,
     num_predict: int = DEFAULT_NUM_PREDICT,
     seed: int | None = None,
+    progress_callback: ProgressCallback = None,
 ) -> dict[str, Any]:
+    def transcription_progress_bridge(event: dict[str, Any]) -> None:
+        raw_percent = float(event.get("percent", 0))
+        mapped_percent = (raw_percent / 100.0) * 60.0
+
+        _emit_progress(
+            progress_callback,
+            stage=event.get("stage", "transcription"),
+            percent=mapped_percent,
+            message=_safe_string(event.get("message", "")),
+            current=event.get("current"),
+            total=event.get("total"),
+        )
+        
     transcription_result = transcribe_playlist(
-        playlist_url=playlist_url,
-        quality=quality,
-        download_progress_callback=download_progress_callback,
-        generate_playlist_excel_file=True,
-    )
+    playlist_url=playlist_url,
+    quality=quality,
+    download_progress_callback=download_progress_callback,
+    generate_playlist_excel_file=True,
+    progress_callback=transcription_progress_bridge,
+)
 
     transcripts_dir = Path(transcription_result.get("transcripts_dir", ""))
 
@@ -401,6 +439,21 @@ def generate_metadata_from_playlist(
 
     playlist_root = Path(transcription_result.get("playlist_root", "")).name or "playlist"
 
+    
+    def metadata_progress_bridge(event: dict[str, Any]) -> None:
+        raw_percent = float(event.get("percent", 0))
+        mapped_percent = 60.0 + ((raw_percent / 100.0) * 40.0)
+
+        _emit_progress(
+            progress_callback,
+            stage=event.get("stage", "metadata"),
+            percent=mapped_percent,
+            message=_safe_string(event.get("message", "")),
+            current=event.get("current"),
+            total=event.get("total"),
+        )
+    
+    
     metadata_result = _run_metadata_only(
         source_type="folder",
         source_path=transcripts_dir,
@@ -415,6 +468,7 @@ def generate_metadata_from_playlist(
         num_ctx=num_ctx,
         num_predict=num_predict,
         seed=seed,
+        progress_callback=metadata_progress_bridge,
     )
 
     return {
