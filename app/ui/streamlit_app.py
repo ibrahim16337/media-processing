@@ -324,6 +324,31 @@ def read_text_file(path: Path):
     except Exception:
         return "Unable to read file."
 
+    
+def create_progress_reporter(section_key: str):
+    progress_bar = st.progress(0)
+    stage_box = st.empty()
+    detail_box = st.empty()
+
+    def report(event: dict):
+        percent = int(float(event.get("percent", 0)))
+        stage = str(event.get("stage", "")).strip()
+        message = str(event.get("message", "")).strip()
+        current = event.get("current")
+        total = event.get("total")
+
+        progress_bar.progress(max(0, min(100, percent)))
+
+        if stage:
+            stage_box.markdown(f"**Stage:** {stage}")
+
+        if current is not None and total is not None and total:
+            detail_box.markdown(f"{message}  \n**Progress:** {current}/{total}")
+        else:
+            detail_box.markdown(message)
+
+    return report
+
 
 def render_text_download(path: Path, label: str, key_prefix: str):
     if path.exists():
@@ -486,8 +511,12 @@ with transcription_tab:
                     st.warning("Please paste a YouTube link first.")
                 else:
                     try:
-                        with st.spinner("Downloading, standardizing, and transcribing..."):
-                            result = transcribe_single_youtube(yt_url.strip())
+                        progress_callback = create_progress_reporter("transcription_single_youtube")
+
+                        result = transcribe_single_youtube(
+                            yt_url.strip(),
+                            progress_callback=progress_callback,
+                        )
 
                         st.session_state["transcription_single_result"] = result
 

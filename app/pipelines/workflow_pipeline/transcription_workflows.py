@@ -15,7 +15,6 @@ from app.config.paths import (
 )
 from app.pipelines.export_pipeline.playlist_excel_exporter import generate_playlist_excel
 from app.pipelines.media_pipeline.audio_standardizer import standardize_audio
-from app.pipelines.media_pipeline.ingestion_runner import run_ingestion
 from app.pipelines.media_pipeline.youtube_downloader import (
     download_youtube_audio,
     fetch_youtube_video_metadata,
@@ -31,6 +30,28 @@ def _safe_string(value: Any) -> str:
     if value is None:
         return ""
     return str(value).strip()
+
+
+def _emit_progress(
+    progress_callback: ProgressCallback,
+    stage: str,
+    percent: float,
+    message: str,
+    current: int | None = None,
+    total: int | None = None,
+) -> None:
+    if progress_callback is None:
+        return
+
+    progress_callback(
+        {
+            "stage": stage,
+            "percent": max(0.0, min(100.0, float(percent))),
+            "message": message,
+            "current": current,
+            "total": total,
+        }
+    )
 
 
 def _find_transcript_files(folder: Path) -> list[Path]:
@@ -73,6 +94,9 @@ def _write_video_meta_sidecar(media_path: Path, metadata: dict[str, Any]) -> Pat
 def _run_transcription_subprocess(
     input_path: Path,
     output_dir: Path,
+    progress_callback: ProgressCallback = None,
+    stage_start_percent: float = 0.0,
+    stage_end_percent: float = 100.0,
 ) -> dict[str, Any]:
     progress_pattern = re.compile(r"(\d+\.\d+)%")
     output_lines: list[str] = []
@@ -84,6 +108,13 @@ def _run_transcription_subprocess(
     env["PYTHONIOENCODING"] = "utf-8"
 
     start_time = time.time()
+
+    _emit_progress(
+        progress_callback,
+        stage="transcribe",
+        percent=stage_start_percent,
+        message="Starting transcription...",
+    )
 
     process = subprocess.Popen(
         cmd,
@@ -112,7 +143,19 @@ def _run_transcription_subprocess(
             match = progress_pattern.search(line)
             if match:
                 try:
-                    last_percent = float(match.group(1))
+                    engine_percent = float(match.group(1))
+                    last_percent = engine_percent
+
+                    mapped_percent = stage_start_percent + (
+                        (engine_percent / 100.0) * (stage_end_percent - stage_start_percent)
+                    )
+
+                    _emit_progress(
+                        progress_callback,
+                        stage="transcribe",
+                        percent=mapped_percent,
+                        message=f"Transcribing... {engine_percent:.2f}%",
+                    )
                 except Exception:
                     pass
 
@@ -120,6 +163,14 @@ def _run_transcription_subprocess(
 
     elapsed = time.time() - start_time
     success = process.returncode == 0
+
+    if success:
+        _emit_progress(
+            progress_callback,
+            stage="transcribe",
+            percent=stage_end_percent,
+            message="Transcription completed.",
+        )
 
     return {
         "ok": success,
@@ -136,6 +187,7 @@ def transcribe_single_youtube(
     transcript_output_dir: Path = TRANSCRIPT_DIR,
     audio_output_dir: Path = UPLOAD_AUDIO_DIR,
     download_progress_callback: ProgressCallback = None,
+    progress_callback: ProgressCallback = None,
 ) -> dict[str, Any]:
     youtube_url = _safe_string(youtube_url)
     if not youtube_url:
@@ -151,15 +203,66 @@ def transcribe_single_youtube(
         youtube_metadata = {}
 
     download_start = time.time()
+
+    def wrapped_download_hook(d: dict[str, Any]) -> None:
+        if download_progress_callback is not None:
+            download_progress_callback(d)
+
+        status = d.get("status", "")
+
+        if status == "downloading":
+            total = d.get("total_bytes") or d.get("total_bytes_estimate")
+            downloaded = d.get("downloaded_bytes", 0)
+
+            if total:
+                raw_percent = (downloaded / total) * 100
+                mapped_percent = (raw_percent / 100.0) * 25.0
+
+                _emit_progress(
+                    progress_callback,
+                    stage="download",
+                    percent=mapped_percent,
+                    message=f"Downloading audio... {raw_percent:.2f}%",
+                )
+
+        elif status == "finished":
+            _emit_progress(
+                progress_callback,
+                stage="download",
+                percent=25.0,
+                message="Download completed.",
+            )
+
+    _emit_progress(
+        progress_callback,
+        stage="download",
+        percent=0,
+        message="Starting YouTube download...",
+    )
+
     downloaded_audio = download_youtube_audio(
         youtube_url,
-        progress_callback=download_progress_callback,
+        progress_callback=wrapped_download_hook,
     )
     download_time = time.time() - download_start
+
+    _emit_progress(
+        progress_callback,
+        stage="standardize",
+        percent=26,
+        message="Standardizing audio...",
+    )
 
     standardize_start = time.time()
     wav_file = standardize_audio(downloaded_audio, audio_output_dir)
     standardize_time = time.time() - standardize_start
+
+    _emit_progress(
+        progress_callback,
+        stage="standardize",
+        percent=35,
+        message="Audio standardization completed.",
+    )
 
     downloaded_sidecar = None
     wav_sidecar = None
@@ -178,6 +281,9 @@ def transcribe_single_youtube(
     transcription_result = _run_transcription_subprocess(
         input_path=wav_file,
         output_dir=transcript_output_dir,
+        progress_callback=progress_callback,
+        stage_start_percent=35,
+        stage_end_percent=100,
     )
 
     transcript_file = _build_transcript_path(wav_file, transcript_output_dir)
@@ -204,6 +310,7 @@ def transcribe_single_media_file(
     media_file: str | Path,
     transcript_output_dir: Path = TRANSCRIPT_DIR,
     audio_output_dir: Path = UPLOAD_AUDIO_DIR,
+    progress_callback: ProgressCallback = None,
 ) -> dict[str, Any]:
     media_path = Path(media_file)
     if not media_path.exists():
@@ -212,13 +319,30 @@ def transcribe_single_media_file(
     transcript_output_dir.mkdir(parents=True, exist_ok=True)
     audio_output_dir.mkdir(parents=True, exist_ok=True)
 
+    _emit_progress(
+        progress_callback,
+        stage="standardize",
+        percent=0,
+        message="Standardizing media...",
+    )
+
     standardize_start = time.time()
     wav_file = standardize_audio(media_path, audio_output_dir)
     standardize_time = time.time() - standardize_start
 
+    _emit_progress(
+        progress_callback,
+        stage="standardize",
+        percent=20,
+        message="Standardization completed.",
+    )
+
     transcription_result = _run_transcription_subprocess(
         input_path=wav_file,
         output_dir=transcript_output_dir,
+        progress_callback=progress_callback,
+        stage_start_percent=20,
+        stage_end_percent=100,
     )
 
     transcript_file = _build_transcript_path(wav_file, transcript_output_dir)
@@ -240,6 +364,7 @@ def transcribe_batch_media(
     audio_input_dir: Path = UPLOAD_AUDIO_DIR,
     video_input_dir: Path = UPLOAD_VIDEO_DIR,
     transcript_output_dir: Path = TRANSCRIPT_DIR,
+    progress_callback: ProgressCallback = None,
 ) -> dict[str, Any]:
     audio_input_dir.mkdir(parents=True, exist_ok=True)
     video_input_dir.mkdir(parents=True, exist_ok=True)
@@ -252,7 +377,37 @@ def transcribe_batch_media(
     standardized_files: list[Path] = []
 
     if initial_video_files:
-        standardized_files = run_ingestion(video_input_dir, audio_input_dir)
+        total_videos = len(initial_video_files)
+
+        _emit_progress(
+            progress_callback,
+            stage="standardize",
+            percent=0,
+            message=f"Standardizing {total_videos} video file(s)...",
+            current=0,
+            total=total_videos,
+        )
+
+        for index, video_file in enumerate(initial_video_files, start=1):
+            wav_file = standardize_audio(video_file, audio_input_dir)
+            standardized_files.append(wav_file)
+
+            mapped_percent = (index / total_videos) * 30.0
+            _emit_progress(
+                progress_callback,
+                stage="standardize",
+                percent=mapped_percent,
+                message=f"Standardized file {index} of {total_videos}: {video_file.name}",
+                current=index,
+                total=total_videos,
+            )
+    else:
+        _emit_progress(
+            progress_callback,
+            stage="standardize",
+            percent=30,
+            message="No video files needed standardization.",
+        )
 
     standardize_time = time.time() - standardize_start
 
@@ -275,6 +430,9 @@ def transcribe_batch_media(
     transcription_result = _run_transcription_subprocess(
         input_path=audio_input_dir,
         output_dir=transcript_output_dir,
+        progress_callback=progress_callback,
+        stage_start_percent=30,
+        stage_end_percent=100,
     )
 
     transcript_files = _find_transcript_files(transcript_output_dir)
@@ -300,17 +458,54 @@ def transcribe_playlist(
     quality: str = "720p",
     download_progress_callback: ProgressCallback = None,
     generate_playlist_excel_file: bool = True,
+    progress_callback: ProgressCallback = None,
 ) -> dict[str, Any]:
     playlist_url = _safe_string(playlist_url)
     if not playlist_url:
         raise ValueError("Playlist URL is required.")
+
+    _emit_progress(
+        progress_callback,
+        stage="download",
+        percent=0,
+        message="Starting playlist download...",
+    )
+
+    def wrapped_playlist_hook(d: dict[str, Any]) -> None:
+        if download_progress_callback is not None:
+            download_progress_callback(d)
+
+        status = d.get("status", "")
+
+        if status == "downloading":
+            total = d.get("total_bytes") or d.get("total_bytes_estimate")
+            downloaded = d.get("downloaded_bytes", 0)
+
+            if total:
+                raw_percent = (downloaded / total) * 100
+                mapped_percent = (raw_percent / 100.0) * 50.0
+
+                _emit_progress(
+                    progress_callback,
+                    stage="download",
+                    percent=mapped_percent,
+                    message=f"Downloading playlist media... {raw_percent:.2f}%",
+                )
+
+        elif status == "finished":
+            _emit_progress(
+                progress_callback,
+                stage="download",
+                percent=50,
+                message="Playlist download completed.",
+            )
 
     playlist_start = time.time()
 
     playlist_data = run_playlist_download(
         url=playlist_url,
         quality=quality,
-        progress_callback=download_progress_callback,
+        progress_callback=wrapped_playlist_hook,
     )
 
     download_time = time.time() - playlist_start
@@ -320,16 +515,47 @@ def transcribe_playlist(
     paths = result["paths"]
     manifest = result["manifest"]
 
+    _emit_progress(
+        progress_callback,
+        stage="standardize",
+        percent=65,
+        message="Playlist audio preparation completed.",
+    )
+
     transcription_result = _run_transcription_subprocess(
         input_path=paths.audio,
         output_dir=paths.transcripts,
+        progress_callback=progress_callback,
+        stage_start_percent=65,
+        stage_end_percent=95,
     )
 
     transcript_files = _find_transcript_files(paths.transcripts)
 
     playlist_excel_path = None
     if generate_playlist_excel_file and transcription_result["ok"]:
+        _emit_progress(
+            progress_callback,
+            stage="export",
+            percent=96,
+            message="Generating playlist Excel export...",
+        )
+
         playlist_excel_path = generate_playlist_excel(paths, manifest)
+
+        _emit_progress(
+            progress_callback,
+            stage="export",
+            percent=100,
+            message="Playlist workflow completed.",
+        )
+    else:
+        _emit_progress(
+            progress_callback,
+            stage="export",
+            percent=100,
+            message="Playlist workflow completed.",
+        )
 
     return {
         "ok": transcription_result["ok"],
