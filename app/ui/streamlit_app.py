@@ -913,20 +913,21 @@ with metadata_tab:
             else:
                 try:
                     seed_value = int(single_seed_text.strip()) if single_seed_text.strip() else None
+                    progress_callback = create_progress_reporter("metadata_single_youtube")
 
-                    with st.spinner("Downloading, transcribing, and generating metadata..."):
-                        result = generate_metadata_from_single_youtube(
-                            youtube_url=single_meta_url.strip(),
-                            model=single_model.strip() or DEFAULT_MODEL,
-                            base_url=single_base_url.strip() or DEFAULT_BASE_URL,
-                            timeout=int(single_timeout),
-                            retries=int(single_retries),
-                            sleep_ms=int(single_sleep_ms),
-                            temperature=float(single_temperature),
-                            num_ctx=int(single_num_ctx),
-                            num_predict=int(single_num_predict),
-                            seed=seed_value,
-                        )
+                    result = generate_metadata_from_single_youtube(
+                        youtube_url=single_meta_url.strip(),
+                        model=single_model.strip() or DEFAULT_MODEL,
+                        base_url=single_base_url.strip() or DEFAULT_BASE_URL,
+                        timeout=int(single_timeout),
+                        retries=int(single_retries),
+                        sleep_ms=int(single_sleep_ms),
+                        temperature=float(single_temperature),
+                        num_ctx=int(single_num_ctx),
+                        num_predict=int(single_num_predict),
+                        seed=seed_value,
+                        progress_callback=progress_callback,
+                    )
 
                     st.session_state["metadata_single_result"] = result
 

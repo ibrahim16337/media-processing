@@ -35,6 +35,27 @@ from app.pipelines.workflow_pipeline.transcription_workflows import (
 ProgressCallback = Callable[[dict[str, Any]], None] | None
 
 
+def _emit_progress(
+    progress_callback: ProgressCallback,
+    stage: str,
+    percent: float,
+    message: str,
+    current: int | None = None,
+    total: int | None = None,
+) -> None:
+    if progress_callback is None:
+        return
+
+    progress_callback(
+        {
+            "stage": stage,
+            "percent": max(0.0, min(100.0, float(percent))),
+            "message": message,
+            "current": current,
+            "total": total,
+        }
+    )
+
 def _safe_string(value: Any) -> str:
     if value is None:
         return ""
@@ -108,6 +129,7 @@ def _run_metadata_only(
     num_ctx: int = DEFAULT_NUM_CTX,
     num_predict: int = DEFAULT_NUM_PREDICT,
     seed: int | None = None,
+    progress_callback: ProgressCallback = None,
 ) -> dict[str, Any]:
     return run_metadata_generation(
         source_type=source_type,
@@ -126,6 +148,7 @@ def _run_metadata_only(
         num_ctx=num_ctx,
         num_predict=num_predict,
         seed=seed,
+        progress_callback=progress_callback,
     )
 
 
@@ -143,10 +166,26 @@ def generate_metadata_from_single_youtube(
     num_ctx: int = DEFAULT_NUM_CTX,
     num_predict: int = DEFAULT_NUM_PREDICT,
     seed: int | None = None,
+    progress_callback: ProgressCallback = None,
 ) -> dict[str, Any]:
+    def transcription_progress_bridge(event: dict[str, Any]) -> None:
+        raw_percent = float(event.get("percent", 0))
+        mapped_percent = (raw_percent / 100.0) * 60.0
+        
+        _emit_progress(
+            progress_callback,
+            stage=event.get("stage", "transcription"),
+            percent=mapped_percent,
+            message=_safe_string(event.get("message", "")),
+            current=event.get("current"),
+            total=event.get("total"),
+        )
+
+    
     transcription_result = transcribe_single_youtube(
         youtube_url=youtube_url,
         download_progress_callback=download_progress_callback,
+        progress_callback=transcription_progress_bridge,
     )
 
     transcript_file = Path(transcription_result.get("transcript_file", ""))
@@ -160,6 +199,20 @@ def generate_metadata_from_single_youtube(
             "error": "Transcription failed or transcript file was not created.",
         }
 
+    def metadata_progress_bridge(event: dict[str, Any]) -> None:
+        raw_percent = float(event.get("percent", 0))
+        mapped_percent = 60.0 + ((raw_percent / 100.0) * 40.0)
+
+        _emit_progress(
+            progress_callback,
+            stage=event.get("stage", "metadata"),
+            percent=mapped_percent,
+            message=_safe_string(event.get("message", "")),
+            current=event.get("current"),
+            total=event.get("total"),
+        )
+    
+    
     metadata_result = _run_metadata_only(
         source_type="single_file",
         source_path=transcript_file,
@@ -174,6 +227,7 @@ def generate_metadata_from_single_youtube(
         num_ctx=num_ctx,
         num_predict=num_predict,
         seed=seed,
+        progress_callback=metadata_progress_bridge,
     )
 
     return {

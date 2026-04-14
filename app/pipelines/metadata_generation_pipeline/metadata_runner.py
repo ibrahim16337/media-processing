@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Sequence, Callable
 
 from openpyxl import load_workbook
 
@@ -52,6 +52,31 @@ from app.pipelines.workflow_pipeline.transcript_export_workflows import (
 
 
 SUPPORTED_SOURCE_TYPES = {"single_file", "folder", "excel"}
+
+
+ProgressCallback = Callable[[dict[str, Any]], None] | None
+
+
+def _emit_progress(
+    progress_callback: ProgressCallback,
+    stage: str,
+    percent: float,
+    message: str,
+    current: int | None = None,
+    total: int | None = None,
+) -> None:
+    if progress_callback is None:
+        return
+
+    progress_callback(
+        {
+            "stage": stage,
+            "percent": max(0.0, min(100.0, float(percent))),
+            "message": message,
+            "current": current,
+            "total": total,
+        }
+    )
 
 
 def _safe_string(value: Any) -> str:
@@ -366,6 +391,7 @@ def run_metadata_generation(
     num_predict: int = DEFAULT_NUM_PREDICT,
     seed: int | None = None,
     system_message: str = "ہمیشہ ان پٹ کی زبان کا احترام کریں اور اگر ان پٹ اردو میں ہو تو اردو میں واضح، درست اور باوقار انداز میں جواب دیں۔",
+    progress_callback: ProgressCallback = None,
 ) -> dict[str, Any]:
     source_type = _safe_string(source_type)
 
@@ -441,10 +467,30 @@ def run_metadata_generation(
         }
 
     total_items = len(items)
+    
+    _emit_progress(
+        progress_callback,
+        stage="metadata",
+        percent=0,
+        message="Starting metadata generation...",
+        current=0,
+        total=total_items,
+    )
 
     for index, item in enumerate(items, start=1):
         filename = _safe_string(item.get("filename", f"item_{index:03d}"))
         transcript_text = _clean_transcript_text(_safe_string(item.get("transcript", "")))
+        
+        base_percent = ((index - 1) / total_items) * 100 if total_items else 0
+
+        _emit_progress(
+            progress_callback,
+            stage="metadata",
+            percent=base_percent,
+            message=f"Generating metadata for item {index} of {total_items}: {filename}",
+            current=index,
+            total=total_items,
+        )       
 
         prompt = build_metadata_prompt(transcript_text)
 
@@ -534,12 +580,42 @@ def run_metadata_generation(
                     "raw_response_file": str(raw_response_file),
                 }
             )
+            
+        done_percent = (index / total_items) * 100 if total_items else 100
+
+        _emit_progress(
+            progress_callback,
+            stage="metadata",
+            percent=done_percent,
+            message=f"Completed item {index} of {total_items}: {filename}",
+            current=index,
+            total=total_items,
+        )    
 
         if sleep_ms > 0 and index < total_items:
             time.sleep(sleep_ms / 1000.0)
 
+
+    _emit_progress(
+        progress_callback,
+        stage="export",
+        percent=99,
+        message="Writing metadata Excel and JSON outputs...",
+        current=total_items,
+        total=total_items,
+    )
+    
     export_metadata_excel(rows=rows, output_file=excel_output)
     export_metadata_json(rows=rows, output_file=json_output)
+    
+    _emit_progress(
+        progress_callback,
+        stage="export",
+        percent=100,
+        message="Metadata generation completed.",
+        current=total_items,
+        total=total_items,
+    )
 
     return {
         "ok": True,
