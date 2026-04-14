@@ -9,7 +9,17 @@ from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
 
-OUTPUT_HEADERS = ["filename", "title", "description", "tags", "hashtags"]
+OUTPUT_HEADERS = [
+    "filename",
+    "title",
+    "transcript",
+    "video_length",
+    "video_type",
+    "description",
+    "tags",
+    "hashtags",
+    "upload_link",
+]
 
 
 def _safe_string(value: Any) -> str:
@@ -56,9 +66,13 @@ def export_metadata_excel(
             [
                 _safe_string(row.get("filename", "")),
                 _safe_string(row.get("title", "")),
+                _safe_string(row.get("transcript", "")),
+                _safe_string(row.get("video_length", "")),
+                _safe_string(row.get("video_type", "")),
                 _safe_string(row.get("description", "")),
                 _safe_string(row.get("tags", "")),
                 _safe_string(row.get("hashtags", "")),
+                _safe_string(row.get("upload_link", "")),
             ]
         )
 
@@ -68,11 +82,15 @@ def export_metadata_excel(
 
     autosize_worksheet(ws, max_width=60)
 
-    ws.column_dimensions["A"].width = min(max(float(ws.column_dimensions["A"].width or 0), 25), 40)
-    ws.column_dimensions["B"].width = min(max(float(ws.column_dimensions["B"].width or 0), 35), 60)
-    ws.column_dimensions["C"].width = 80
-    ws.column_dimensions["D"].width = min(max(float(ws.column_dimensions["D"].width or 0), 40), 80)
-    ws.column_dimensions["E"].width = min(max(float(ws.column_dimensions["E"].width or 0), 25), 40)
+    ws.column_dimensions["A"].width = min(max(float(ws.column_dimensions["A"].width or 0), 25), 40)  # filename
+    ws.column_dimensions["B"].width = min(max(float(ws.column_dimensions["B"].width or 0), 35), 60)  # title
+    ws.column_dimensions["C"].width = 90  # transcript
+    ws.column_dimensions["D"].width = min(max(float(ws.column_dimensions["D"].width or 0), 18), 25)  # video_length
+    ws.column_dimensions["E"].width = min(max(float(ws.column_dimensions["E"].width or 0), 18), 25)  # video_type
+    ws.column_dimensions["F"].width = 80  # description
+    ws.column_dimensions["G"].width = min(max(float(ws.column_dimensions["G"].width or 0), 40), 80)  # tags
+    ws.column_dimensions["H"].width = min(max(float(ws.column_dimensions["H"].width or 0), 25), 40)  # hashtags
+    ws.column_dimensions["I"].width = min(max(float(ws.column_dimensions["I"].width or 0), 30), 60)  # upload_link
 
     wb.save(output_path)
     return output_path
