@@ -595,8 +595,11 @@ with transcription_tab:
         with batch_action_col2:
             if st.button("Start Batch Transcription", key="transcription_batch_start"):
                 try:
-                    with st.spinner("Standardizing and transcribing batch media..."):
-                        result = transcribe_batch_media()
+                    progress_callback = create_progress_reporter("transcription_batch")
+
+                    result = transcribe_batch_media(
+                        progress_callback=progress_callback,
+                    )
 
                     st.session_state["transcription_batch_result"] = result
 
