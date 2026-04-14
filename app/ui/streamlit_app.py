@@ -1073,22 +1073,23 @@ with metadata_tab:
                         seed_value = int(batch_seed_text.strip()) if batch_seed_text.strip() else None
 
                         saved_paths = save_uploaded_transcript_files(uploaded_meta_txt_files, transcript_upload_dir)
+                        progress_callback = create_progress_reporter("metadata_batch_txt")
 
-                        with st.spinner("Generating metadata from transcript files..."):
-                            result = generate_metadata_from_transcript_files(
-                                transcript_files=saved_paths,
-                                output_name="uploaded_transcript_files",
-                                metadata_output_dir=METADATA_BATCH_DIR,
-                                model=batch_model.strip() or DEFAULT_MODEL,
-                                base_url=batch_base_url.strip() or DEFAULT_BASE_URL,
-                                timeout=int(batch_timeout),
-                                retries=int(batch_retries),
-                                sleep_ms=int(batch_sleep_ms),
-                                temperature=float(batch_temperature),
-                                num_ctx=int(batch_num_ctx),
-                                num_predict=int(batch_num_predict),
-                                seed=seed_value,
-                            )
+                        result = generate_metadata_from_transcript_files(
+                            transcript_files=saved_paths,
+                            output_name="uploaded_transcript_files",
+                            metadata_output_dir=METADATA_BATCH_DIR,
+                            model=batch_model.strip() or DEFAULT_MODEL,
+                            base_url=batch_base_url.strip() or DEFAULT_BASE_URL,
+                            timeout=int(batch_timeout),
+                            retries=int(batch_retries),
+                            sleep_ms=int(batch_sleep_ms),
+                            temperature=float(batch_temperature),
+                            num_ctx=int(batch_num_ctx),
+                            num_predict=int(batch_num_predict),
+                            seed=seed_value,
+                            progress_callback=progress_callback,
+                        )
 
                         st.session_state["metadata_batch_result"] = result
 
@@ -1391,64 +1392,67 @@ with metadata_tab:
         if st.button("Generate Metadata", key="metadata_existing_generate_button"):
             try:
                 seed_value = int(existing_seed_text.strip()) if existing_seed_text.strip() else None
+                progress_callback = create_progress_reporter("metadata_existing")
 
-                with st.spinner("Generating metadata..."):
-                    if existing_mode == "Single TXT":
-                        if selected_transcript_file is None:
-                            st.warning("Please choose or upload a transcript file first.")
-                        else:
-                            result = generate_metadata_from_single_transcript_file(
-                                transcript_file=selected_transcript_file,
-                                model=existing_model.strip() or DEFAULT_MODEL,
-                                base_url=existing_base_url.strip() or DEFAULT_BASE_URL,
-                                timeout=int(existing_timeout),
-                                retries=int(existing_retries),
-                                sleep_ms=int(existing_sleep_ms),
-                                temperature=float(existing_temperature),
-                                num_ctx=int(existing_num_ctx),
-                                num_predict=int(existing_num_predict),
-                                seed=seed_value,
-                            )
-                            st.session_state["metadata_existing_result"] = result
-
-                    elif existing_mode == "Transcript Folder":
-                        if selected_transcript_folder is None:
-                            st.warning("Please select a transcript folder first.")
-                        else:
-                            result = generate_metadata_from_transcript_folder(
-                                transcript_folder=selected_transcript_folder,
-                                model=existing_model.strip() or DEFAULT_MODEL,
-                                base_url=existing_base_url.strip() or DEFAULT_BASE_URL,
-                                timeout=int(existing_timeout),
-                                retries=int(existing_retries),
-                                sleep_ms=int(existing_sleep_ms),
-                                temperature=float(existing_temperature),
-                                num_ctx=int(existing_num_ctx),
-                                num_predict=int(existing_num_predict),
-                                seed=seed_value,
-                            )
-                            st.session_state["metadata_existing_result"] = result
-
+                if existing_mode == "Single TXT":
+                    if selected_transcript_file is None:
+                        st.warning("Please choose or upload a transcript file first.")
                     else:
-                        if selected_excel_path is None or not selected_transcript_column:
-                            st.warning("Please choose an Excel file and transcript column first.")
-                        else:
-                            result = generate_metadata_from_excel(
-                                excel_file=selected_excel_path,
-                                transcript_column=selected_transcript_column,
-                                filename_column=selected_filename_column,
-                                sheet_name=selected_sheet_name,
-                                model=existing_model.strip() or DEFAULT_MODEL,
-                                base_url=existing_base_url.strip() or DEFAULT_BASE_URL,
-                                timeout=int(existing_timeout),
-                                retries=int(existing_retries),
-                                sleep_ms=int(existing_sleep_ms),
-                                temperature=float(existing_temperature),
-                                num_ctx=int(existing_num_ctx),
-                                num_predict=int(existing_num_predict),
-                                seed=seed_value,
-                            )
-                            st.session_state["metadata_existing_result"] = result
+                        result = generate_metadata_from_single_transcript_file(
+                            transcript_file=selected_transcript_file,
+                            model=existing_model.strip() or DEFAULT_MODEL,
+                            base_url=existing_base_url.strip() or DEFAULT_BASE_URL,
+                            timeout=int(existing_timeout),
+                            retries=int(existing_retries),
+                            sleep_ms=int(existing_sleep_ms),
+                            temperature=float(existing_temperature),
+                            num_ctx=int(existing_num_ctx),
+                            num_predict=int(existing_num_predict),
+                            seed=seed_value,
+                            progress_callback=progress_callback,
+                        )
+                        st.session_state["metadata_existing_result"] = result
+
+                elif existing_mode == "Transcript Folder":
+                    if selected_transcript_folder is None:
+                        st.warning("Please select a transcript folder first.")
+                    else:
+                        result = generate_metadata_from_transcript_folder(
+                            transcript_folder=selected_transcript_folder,
+                            model=existing_model.strip() or DEFAULT_MODEL,
+                            base_url=existing_base_url.strip() or DEFAULT_BASE_URL,
+                            timeout=int(existing_timeout),
+                            retries=int(existing_retries),
+                            sleep_ms=int(existing_sleep_ms),
+                            temperature=float(existing_temperature),
+                            num_ctx=int(existing_num_ctx),
+                            num_predict=int(existing_num_predict),
+                            seed=seed_value,
+                            progress_callback=progress_callback,
+                        )
+                        st.session_state["metadata_existing_result"] = result
+
+                else:
+                    if selected_excel_path is None or not selected_transcript_column:
+                        st.warning("Please choose an Excel file and transcript column first.")
+                    else:
+                        result = generate_metadata_from_excel(
+                            excel_file=selected_excel_path,
+                            transcript_column=selected_transcript_column,
+                            filename_column=selected_filename_column,
+                            sheet_name=selected_sheet_name,
+                            model=existing_model.strip() or DEFAULT_MODEL,
+                            base_url=existing_base_url.strip() or DEFAULT_BASE_URL,
+                            timeout=int(existing_timeout),
+                            retries=int(existing_retries),
+                            sleep_ms=int(existing_sleep_ms),
+                            temperature=float(existing_temperature),
+                            num_ctx=int(existing_num_ctx),
+                            num_predict=int(existing_num_predict),
+                            seed=seed_value,
+                            progress_callback=progress_callback,
+                        )
+                        st.session_state["metadata_existing_result"] = result
 
                 existing_result = st.session_state.get("metadata_existing_result")
                 if existing_result:

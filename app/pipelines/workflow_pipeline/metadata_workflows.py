@@ -495,6 +495,7 @@ def generate_metadata_from_single_transcript_file(
     num_ctx: int = DEFAULT_NUM_CTX,
     num_predict: int = DEFAULT_NUM_PREDICT,
     seed: int | None = None,
+    progress_callback: ProgressCallback = None,
 ) -> dict[str, Any]:
     transcript_path = Path(transcript_file)
     if not transcript_path.exists():
@@ -514,6 +515,7 @@ def generate_metadata_from_single_transcript_file(
         num_ctx=num_ctx,
         num_predict=num_predict,
         seed=seed,
+        progress_callback=progress_callback,
     )
 
     return {
@@ -538,6 +540,7 @@ def generate_metadata_from_transcript_folder(
     num_ctx: int = DEFAULT_NUM_CTX,
     num_predict: int = DEFAULT_NUM_PREDICT,
     seed: int | None = None,
+    progress_callback: ProgressCallback = None,
 ) -> dict[str, Any]:
     folder_path = Path(transcript_folder)
     if not folder_path.exists():
@@ -557,6 +560,7 @@ def generate_metadata_from_transcript_folder(
         num_ctx=num_ctx,
         num_predict=num_predict,
         seed=seed,
+        progress_callback=progress_callback,
     )
 
     return {
@@ -581,6 +585,7 @@ def generate_metadata_from_transcript_files(
     num_ctx: int = DEFAULT_NUM_CTX,
     num_predict: int = DEFAULT_NUM_PREDICT,
     seed: int | None = None,
+    progress_callback: ProgressCallback = None,
 ) -> dict[str, Any]:
     valid_files = [Path(p) for p in transcript_files if Path(p).exists() and Path(p).is_file()]
 
@@ -605,6 +610,7 @@ def generate_metadata_from_transcript_files(
         num_ctx=num_ctx,
         num_predict=num_predict,
         seed=seed,
+        progress_callback=progress_callback,
     )
 
     return {
@@ -633,6 +639,7 @@ def generate_metadata_from_excel(
     num_ctx: int = DEFAULT_NUM_CTX,
     num_predict: int = DEFAULT_NUM_PREDICT,
     seed: int | None = None,
+    progress_callback: ProgressCallback = None,
 ) -> dict[str, Any]:
     excel_path = Path(excel_file)
     if not excel_path.exists():
@@ -655,6 +662,7 @@ def generate_metadata_from_excel(
         num_ctx=num_ctx,
         num_predict=num_predict,
         seed=seed,
+        progress_callback=progress_callback,
     )
 
     return {
