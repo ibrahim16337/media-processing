@@ -42,7 +42,6 @@ from app.pipelines.metadata_generation_pipeline.response_parser import (
     parse_metadata_json,
 )
 from app.pipelines.metadata_generation_pipeline.transcript_sources import (
-    get_excel_columns,
     load_single_transcript_file,
     load_transcript_folder,
     load_transcripts_from_excel,
@@ -59,6 +58,31 @@ def _safe_string(value: Any) -> str:
     if value is None:
         return ""
     return str(value).strip()
+
+
+def _clean_transcript_text(text: str) -> str:
+    text = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+    lines = text.split("\n")
+
+    cleaned_lines: list[str] = []
+    header_phase = True
+
+    for line in lines:
+        stripped = line.strip()
+
+        if header_phase:
+            if not stripped:
+                continue
+            if stripped.startswith("Audio Length:"):
+                continue
+            if stripped.startswith("Detected Language:"):
+                continue
+
+            header_phase = False
+
+        cleaned_lines.append(line)
+
+    return "\n".join(cleaned_lines).strip()
 
 
 def _timestamp_str() -> str:
@@ -234,6 +258,7 @@ def _find_header_index(headers: Sequence[str], target_name: str) -> int | None:
 
 def _build_excel_enrichment_by_row_number(
     excel_path: str | Path,
+    transcript_column: str,
     sheet_name: str | None = None,
 ) -> dict[int, dict[str, str]]:
     path = Path(excel_path)
@@ -252,9 +277,9 @@ def _build_excel_enrichment_by_row_number(
             return {}
 
         headers = [_safe_string(cell) for cell in header_row]
+        transcript_idx = _find_header_index(headers, transcript_column)
         time_idx = _find_header_index(headers, "time")
         frame_size_idx = _find_header_index(headers, "frame_size")
-        transcription_idx = _find_header_index(headers, "transcription")
 
         enrichment: dict[int, dict[str, str]] = {}
 
@@ -262,8 +287,8 @@ def _build_excel_enrichment_by_row_number(
             row_values = list(row)
 
             transcript_text = ""
-            if transcription_idx is not None and transcription_idx < len(row_values):
-                transcript_text = _safe_string(row_values[transcription_idx])
+            if transcript_idx is not None and transcript_idx < len(row_values):
+                transcript_text = _clean_transcript_text(_safe_string(row_values[transcript_idx]))
 
             video_length = ""
             if time_idx is not None and time_idx < len(row_values):
@@ -292,13 +317,13 @@ def _build_enriched_metadata_row(
     excel_enrichment_by_row_number: dict[int, dict[str, str]] | None = None,
 ) -> dict[str, str]:
     filename = _safe_string(item.get("filename", ""))
-    transcript_text = _safe_string(item.get("transcript", ""))
+    transcript_text = _clean_transcript_text(_safe_string(item.get("transcript", "")))
     video_length = ""
     video_type = ""
 
     if transcript_enrichment_by_filename:
         enrichment = transcript_enrichment_by_filename.get(filename, {})
-        transcript_text = _safe_string(enrichment.get("transcription", transcript_text))
+        transcript_text = _clean_transcript_text(_safe_string(enrichment.get("transcription", transcript_text)))
         video_length = _safe_string(enrichment.get("audio length", ""))
         video_type = _safe_string(enrichment.get("video type", ""))
 
@@ -306,7 +331,7 @@ def _build_enriched_metadata_row(
         row_number = item.get("row_number")
         if isinstance(row_number, int):
             enrichment = excel_enrichment_by_row_number.get(row_number, {})
-            transcript_text = _safe_string(enrichment.get("transcript", transcript_text))
+            transcript_text = _clean_transcript_text(_safe_string(enrichment.get("transcript", transcript_text)))
             video_length = _safe_string(enrichment.get("video_length", video_length))
             video_type = _safe_string(enrichment.get("video_type", video_type))
 
@@ -385,9 +410,10 @@ def run_metadata_generation(
             source_path=source_path,
         )
 
-    if source_type == "excel":
+    if source_type == "excel" and transcript_column:
         excel_enrichment_by_row_number = _build_excel_enrichment_by_row_number(
             excel_path=source_path,
+            transcript_column=transcript_column,
             sheet_name=sheet_name,
         )
 
@@ -418,7 +444,7 @@ def run_metadata_generation(
 
     for index, item in enumerate(items, start=1):
         filename = _safe_string(item.get("filename", f"item_{index:03d}"))
-        transcript_text = _safe_string(item.get("transcript", ""))
+        transcript_text = _clean_transcript_text(_safe_string(item.get("transcript", "")))
 
         prompt = build_metadata_prompt(transcript_text)
 

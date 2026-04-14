@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import subprocess
 import zipfile
 from pathlib import Path
@@ -38,6 +39,31 @@ def _safe_string(value: Any) -> str:
     return str(value).strip()
 
 
+def _clean_transcript_text(text: str) -> str:
+    text = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+    lines = text.split("\n")
+
+    cleaned_lines: list[str] = []
+    header_phase = True
+
+    for line in lines:
+        stripped = line.strip()
+
+        if header_phase:
+            if not stripped:
+                continue
+            if stripped.startswith("Audio Length:"):
+                continue
+            if stripped.startswith("Detected Language:"):
+                continue
+
+            header_phase = False
+
+        cleaned_lines.append(line)
+
+    return "\n".join(cleaned_lines).strip()
+
+
 def _read_text_any(path: Path) -> str:
     last_error: Exception | None = None
 
@@ -58,10 +84,7 @@ def _find_transcript_files(folder: Path) -> list[Path]:
         return []
 
     return sorted(
-        [
-            p for p in folder.glob("*.txt")
-            if p.is_file()
-        ],
+        [p for p in folder.glob("*.txt") if p.is_file()],
         key=lambda p: p.name.lower(),
     )
 
@@ -157,7 +180,6 @@ def _probe_video_dimensions(media_path: Path) -> tuple[int | None, int | None]:
 def _build_video_type_label(width: int | None, height: int | None) -> str:
     if not width or not height:
         return ""
-
     return "Short" if height > width else "Long"
 
 
@@ -188,6 +210,18 @@ def _find_matching_media_file(
     return None
 
 
+def _read_video_meta_sidecar(media_path: Path) -> dict[str, Any]:
+    sidecar_path = media_path.with_suffix(".video_meta.json")
+
+    if not sidecar_path.exists() or not sidecar_path.is_file():
+        return {}
+
+    try:
+        return json.loads(sidecar_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
 def build_transcript_rows(
     transcript_files: Sequence[str | Path],
     media_lookup_dirs: Sequence[str | Path] | None = None,
@@ -199,7 +233,8 @@ def build_transcript_rows(
 
     for transcript_file in normalized_transcript_files:
         try:
-            transcription_text = _read_text_any(transcript_file).strip()
+            raw_text = _read_text_any(transcript_file)
+            transcription_text = _clean_transcript_text(raw_text)
         except Exception:
             transcription_text = ""
 
@@ -208,12 +243,28 @@ def build_transcript_rows(
             media_lookup_dirs=normalized_media_dirs,
         )
 
-        audio_length = _probe_media_duration(matched_media) if matched_media else ""
-
+        audio_length = ""
         video_type = ""
+
         if matched_media:
+            audio_length = _probe_media_duration(matched_media)
+
             width, height = _probe_video_dimensions(matched_media)
             video_type = _build_video_type_label(width, height)
+
+            if not video_type or not audio_length:
+                sidecar = _read_video_meta_sidecar(matched_media)
+
+                if not audio_length and sidecar.get("duration_seconds") is not None:
+                    audio_length = _format_duration(sidecar.get("duration_seconds"))
+
+                if not video_type:
+                    side_width = sidecar.get("video_width")
+                    side_height = sidecar.get("video_height")
+                    video_type = _build_video_type_label(side_width, side_height)
+
+                    if not video_type:
+                        video_type = _safe_string(sidecar.get("video_type", ""))
 
         rows.append(
             {
