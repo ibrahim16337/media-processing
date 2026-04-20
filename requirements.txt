@@ -3,3 +3,5 @@ faster-whisper
 onnxruntime
 yt-dlp
 openpyxl
+python-dotenv
+paramiko

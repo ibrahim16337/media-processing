@@ -49,6 +49,7 @@ LOG_DIR = BASE_DIR / "logs"
 # ---------------------------------------------------
 
 TEMP_DIR = DATA_DIR / "temp"
+SERVER_UPLOAD_TEMP_DIR = TEMP_DIR / "server_upload"
 
 # ---------------------------------------------------
 # Dataset export
@@ -113,6 +114,7 @@ def build_playlist_paths(playlist_name: str) -> PlaylistPaths:
         WHISPER_CACHE_DIR,
         LOG_DIR,
         TEMP_DIR,
+        SERVER_UPLOAD_TEMP_DIR,
         DATASET_DIR,
         paths.root,
         paths.videos,
@@ -147,6 +149,7 @@ dirs = [
     WHISPER_CACHE_DIR,
     LOG_DIR,
     TEMP_DIR,
+    SERVER_UPLOAD_TEMP_DIR,
     DATASET_DIR,
 ]
 
