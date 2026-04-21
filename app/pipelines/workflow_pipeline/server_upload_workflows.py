@@ -67,6 +67,36 @@ def _build_breadcrumbs(current_path: str) -> list[dict[str, str]]:
     return breadcrumbs
 
 
+def _validate_new_folder_name(folder_name: str) -> str:
+    name = _safe_string(folder_name)
+
+    if not name:
+        raise ValueError("Folder name is required.")
+    if name in {".", ".."}:
+        raise ValueError("Folder name cannot be '.' or '..'.")
+    if "/" in name or "\\" in name:
+        raise ValueError("Folder name cannot contain slashes.")
+
+    return name
+
+
+def _filter_files(files: list[dict[str, Any]], query: str, videos_only: bool = False) -> list[dict[str, Any]]:
+    normalized_query = _safe_string(query).lower()
+
+    filtered = []
+    for file in files:
+        if videos_only and not bool(file.get("is_video", False)):
+            continue
+
+        filename = _safe_string(file.get("name", "")).lower()
+        if normalized_query and normalized_query not in filename:
+            continue
+
+        filtered.append(file)
+
+    return filtered
+
+
 def browse_remote_directory(remote_path: str | None = None) -> dict[str, Any]:
     config = get_server_upload_config()
     requested_path = _safe_string(remote_path) or config.remote_root or "/"
@@ -118,6 +148,72 @@ def browse_remote_child(current_path: str, child_folder_name: str) -> dict[str, 
     child_path = _normalize_remote_path(child_path)
 
     return browse_remote_directory(child_path)
+
+
+def browse_remote_path(remote_path: str) -> dict[str, Any]:
+    return browse_remote_directory(remote_path)
+
+
+def create_remote_folder(current_path: str, folder_name: str) -> dict[str, Any]:
+    current_path = _normalize_remote_path(current_path)
+    validated_name = _validate_new_folder_name(folder_name)
+    new_folder_path = _normalize_remote_path(posixpath.join(current_path, validated_name))
+
+    with SFTPServerClient() as client:
+        create_result = client.create_directory(
+            new_folder_path,
+            exist_ok=False,
+            recursive=True,
+        )
+
+    refreshed_snapshot = browse_remote_directory(current_path)
+
+    return {
+        "ok": True,
+        "current_path": current_path,
+        "created_folder_name": validated_name,
+        "created_folder_path": create_result["path"],
+        "snapshot": refreshed_snapshot,
+    }
+
+
+def delete_remote_file(remote_file_path: str, current_path: str | None = None) -> dict[str, Any]:
+    normalized_file_path = _normalize_remote_path(remote_file_path)
+
+    with SFTPServerClient() as client:
+        delete_result = client.delete_file(normalized_file_path)
+
+    refresh_path = _normalize_remote_path(current_path) if current_path else _normalize_remote_path(
+        posixpath.dirname(normalized_file_path)
+    )
+
+    refreshed_snapshot = browse_remote_directory(refresh_path)
+
+    return {
+        "ok": True,
+        "deleted_file_name": delete_result["filename"],
+        "deleted_file_path": delete_result["remote_path"],
+        "snapshot": refreshed_snapshot,
+    }
+
+
+def search_remote_videos(current_path: str, query: str) -> dict[str, Any]:
+    snapshot = browse_remote_directory(current_path)
+    matches = _filter_files(snapshot.get("files", []), query=query, videos_only=True)
+
+    return {
+        "ok": True,
+        "current_path": snapshot["current_path"],
+        "query": _safe_string(query),
+        "match_count": len(matches),
+        "matches": matches,
+        "snapshot": snapshot,
+    }
+
+
+def filter_remote_files_in_snapshot(snapshot: dict[str, Any], query: str, videos_only: bool = False) -> list[dict[str, Any]]:
+    files = snapshot.get("files", [])
+    return _filter_files(files, query=query, videos_only=videos_only)
 
 
 def upload_streamlit_video_files(

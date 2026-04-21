@@ -120,6 +120,19 @@ class SFTPServerClient:
         except IOError:
             return False
 
+    def is_directory(self, remote_path: str) -> bool:
+        sftp = self._require_sftp()
+        path = self.normalize_remote_path(remote_path)
+
+        try:
+            attrs = sftp.stat(path)
+            mode = int(getattr(attrs, "st_mode", 0) or 0)
+            return stat.S_ISDIR(mode)
+        except FileNotFoundError:
+            return False
+        except IOError:
+            return False
+
     def list_directory(self, remote_path: str | None = None) -> dict[str, Any]:
         sftp = self._require_sftp()
         path = self.normalize_remote_path(remote_path)
@@ -169,6 +182,83 @@ class SFTPServerClient:
 
     def list_root(self) -> dict[str, Any]:
         return self.list_directory(self.config.remote_root)
+
+    def create_directory(
+        self,
+        remote_path: str,
+        exist_ok: bool = False,
+        recursive: bool = True,
+    ) -> dict[str, Any]:
+        sftp = self._require_sftp()
+        normalized_path = self.normalize_remote_path(remote_path)
+
+        if normalized_path == "/":
+            return {
+                "created": False,
+                "path": "/",
+                "name": "/",
+            }
+
+        if self.path_exists(normalized_path):
+            if not self.is_directory(normalized_path):
+                raise NotADirectoryError(f"Remote path exists but is not a directory: {normalized_path}")
+            if not exist_ok:
+                raise FileExistsError(f"Remote directory already exists: {normalized_path}")
+            return {
+                "created": False,
+                "path": normalized_path,
+                "name": posixpath.basename(normalized_path),
+            }
+
+        parts = [part for part in normalized_path.split("/") if part]
+        current = "/"
+        created_any = False
+
+        for index, part in enumerate(parts, start=1):
+            if current == "/":
+                current = f"/{part}"
+            else:
+                current = posixpath.join(current, part)
+
+            if self.path_exists(current):
+                if not self.is_directory(current):
+                    raise NotADirectoryError(f"Remote path exists but is not a directory: {current}")
+                continue
+
+            if not recursive and index != len(parts):
+                raise FileNotFoundError(
+                    f"Parent directory does not exist for non-recursive create: {normalized_path}"
+                )
+
+            sftp.mkdir(current)
+            created_any = True
+
+        return {
+            "created": created_any,
+            "path": normalized_path,
+            "name": posixpath.basename(normalized_path),
+        }
+
+    def delete_file(self, remote_file_path: str) -> dict[str, Any]:
+        sftp = self._require_sftp()
+        normalized_path = self.normalize_remote_path(remote_file_path)
+
+        if not self.path_exists(normalized_path):
+            raise FileNotFoundError(f"Remote file not found: {normalized_path}")
+
+        attrs = sftp.stat(normalized_path)
+        mode = int(getattr(attrs, "st_mode", 0) or 0)
+        
+        if stat.S_ISDIR(mode):
+            raise IsADirectoryError(f"Remote path is a directory, not a file: {normalized_path}")
+
+        sftp.remove(normalized_path)
+
+        return {
+            "deleted": True,
+            "remote_path": normalized_path,
+            "filename": posixpath.basename(normalized_path),
+        }
 
     def upload_file(
         self,

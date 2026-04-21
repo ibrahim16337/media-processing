@@ -64,6 +64,10 @@ from app.pipelines.workflow_pipeline.server_upload_workflows import (
     browse_remote_directory,
     browse_remote_parent,
     browse_remote_child,
+    browse_remote_path,
+    create_remote_folder,
+    delete_remote_file,
+    filter_remote_files_in_snapshot,
     upload_streamlit_video_files,
 )
 
@@ -97,8 +101,9 @@ st.session_state.setdefault("metadata_existing_result", None)
 st.session_state.setdefault("server_browser_snapshot", None)
 st.session_state.setdefault("server_browser_error", "")
 st.session_state.setdefault("server_selected_remote_path", "")
-
 st.session_state.setdefault("server_upload_result", None)
+st.session_state.setdefault("server_upload_notice", "")
+st.session_state.setdefault("server_upload_notice_level", "success")
 
 # --------------------------------------------------
 # Constants
@@ -1501,6 +1506,20 @@ with metadata_tab:
 with server_upload_tab:
     st.subheader("Server Upload")
 
+    notice_text = st.session_state.get("server_upload_notice", "").strip()
+    notice_level = st.session_state.get("server_upload_notice_level", "success")
+
+    if notice_text:
+        if notice_level == "error":
+            st.error(notice_text)
+        elif notice_level == "warning":
+            st.warning(notice_text)
+        else:
+            st.success(notice_text)
+
+        st.session_state["server_upload_notice"] = ""
+        st.session_state["server_upload_notice_level"] = "success"
+
     config_col1, config_col2, config_col3 = st.columns(3)
 
     try:
@@ -1523,20 +1542,28 @@ with server_upload_tab:
 
     with browser_action_col1:
         if st.button("Load Server Root", key="server_upload_load_root"):
-            root_snapshot = browse_remote_root()
-            st.session_state["server_browser_snapshot"] = root_snapshot
-            st.session_state["server_browser_error"] = ""
-            st.session_state["server_selected_remote_path"] = root_snapshot.get("current_path", "")
-            st.rerun()
+            try:
+                root_snapshot = browse_remote_root()
+                st.session_state["server_browser_snapshot"] = root_snapshot
+                st.session_state["server_browser_error"] = ""
+                st.session_state["server_selected_remote_path"] = root_snapshot.get("current_path", "")
+                st.rerun()
+            except Exception as e:
+                st.session_state["server_browser_error"] = str(e)
+                st.rerun()
 
     with browser_action_col2:
         if st.button("Refresh Current Folder", key="server_upload_refresh_current"):
-            current_path = st.session_state.get("server_selected_remote_path", "")
-            refreshed_snapshot = browse_remote_directory(current_path or "/")
-            st.session_state["server_browser_snapshot"] = refreshed_snapshot
-            st.session_state["server_browser_error"] = ""
-            st.session_state["server_selected_remote_path"] = refreshed_snapshot.get("current_path", "")
-            st.rerun()
+            try:
+                current_path = st.session_state.get("server_selected_remote_path", "")
+                refreshed_snapshot = browse_remote_directory(current_path or "/")
+                st.session_state["server_browser_snapshot"] = refreshed_snapshot
+                st.session_state["server_browser_error"] = ""
+                st.session_state["server_selected_remote_path"] = refreshed_snapshot.get("current_path", "")
+                st.rerun()
+            except Exception as e:
+                st.session_state["server_browser_error"] = str(e)
+                st.rerun()
 
     browser_error = st.session_state.get("server_browser_error", "")
     if browser_error:
@@ -1548,15 +1575,38 @@ with server_upload_tab:
         snapshot = load_server_browser_snapshot()
 
     if snapshot:
-        st.markdown("### Current Remote Location")
-        st.write(f"**Current Path:** `{snapshot.get('current_path', '/')}`")
+        current_remote_path = str(snapshot.get("current_path", "/"))
 
+        st.markdown("### Current Remote Location")
+        st.write(f"**Current Path:** `{current_remote_path}`")
+
+        # ------------------------------------------
+        # Clickable Breadcrumbs
+        # ------------------------------------------
         breadcrumbs = snapshot.get("breadcrumbs", [])
         if breadcrumbs:
-            breadcrumb_labels = "  /  ".join(
-                [f"`{crumb['name']}`" for crumb in breadcrumbs]
-            )
-            st.markdown(f"**Breadcrumbs:** {breadcrumb_labels}")
+            st.markdown("### Breadcrumb Navigation")
+
+            crumb_cols = st.columns(len(breadcrumbs))
+            for idx, crumb in enumerate(breadcrumbs):
+                crumb_name = str(crumb.get("name", "/"))
+                crumb_path = str(crumb.get("path", "/"))
+
+                with crumb_cols[idx]:
+                    if st.button(
+                        crumb_name,
+                        key=f"server_upload_breadcrumb_{idx}_{crumb_path}",
+                        use_container_width=True,
+                    ):
+                        try:
+                            breadcrumb_snapshot = browse_remote_path(crumb_path)
+                            st.session_state["server_browser_snapshot"] = breadcrumb_snapshot
+                            st.session_state["server_browser_error"] = ""
+                            st.session_state["server_selected_remote_path"] = breadcrumb_snapshot.get("current_path", "")
+                            st.rerun()
+                        except Exception as e:
+                            st.session_state["server_browser_error"] = str(e)
+                            st.rerun()
 
         stats_col1, stats_col2, stats_col3 = st.columns(3)
 
@@ -1575,55 +1625,168 @@ with server_upload_tab:
             parent_path = snapshot.get("parent_path")
             if parent_path:
                 if st.button("Go To Parent Folder", key="server_upload_go_parent"):
-                    parent_snapshot = browse_remote_parent(snapshot.get("current_path", "/"))
-                    st.session_state["server_browser_snapshot"] = parent_snapshot
-                    st.session_state["server_browser_error"] = ""
-                    st.session_state["server_selected_remote_path"] = parent_snapshot.get("current_path", "")
-                    st.rerun()
+                    try:
+                        parent_snapshot = browse_remote_parent(current_remote_path)
+                        st.session_state["server_browser_snapshot"] = parent_snapshot
+                        st.session_state["server_browser_error"] = ""
+                        st.session_state["server_selected_remote_path"] = parent_snapshot.get("current_path", "")
+                        st.rerun()
+                    except Exception as e:
+                        st.session_state["server_browser_error"] = str(e)
+                        st.rerun()
 
         with nav_col2:
             if st.button("Reload This Folder", key="server_upload_reload_folder"):
-                refreshed_snapshot = browse_remote_directory(snapshot.get("current_path", "/"))
-                st.session_state["server_browser_snapshot"] = refreshed_snapshot
-                st.session_state["server_browser_error"] = ""
-                st.session_state["server_selected_remote_path"] = refreshed_snapshot.get("current_path", "")
-                st.rerun()
+                try:
+                    refreshed_snapshot = browse_remote_directory(current_remote_path)
+                    st.session_state["server_browser_snapshot"] = refreshed_snapshot
+                    st.session_state["server_browser_error"] = ""
+                    st.session_state["server_selected_remote_path"] = refreshed_snapshot.get("current_path", "")
+                    st.rerun()
+                except Exception as e:
+                    st.session_state["server_browser_error"] = str(e)
+                    st.rerun()
 
-        st.markdown("### Remote Folders")
+        # ------------------------------------------
+        # Folder open + create folder
+        # ------------------------------------------
+        folder_tool_col1, folder_tool_col2 = st.columns(2)
 
-        folders = snapshot.get("folders", [])
-        if folders:
-            folder_names: list[str] = [str(folder.get("name", "")) for folder in folders if folder.get("name")]
+        with folder_tool_col1:
+            st.markdown("### Remote Folders")
 
-            selected_folder_name: str = str(
-                st.selectbox(
-                    "Select Folder To Open",
-                    options=folder_names,
-                    key="server_upload_folder_selectbox",
+            folders = snapshot.get("folders", [])
+            if folders:
+                folder_names: list[str] = [str(folder.get("name", "")) for folder in folders if folder.get("name")]
+
+                selected_folder_name: str = str(
+                    st.selectbox(
+                        "Select Folder To Open",
+                        options=folder_names,
+                        key="server_upload_folder_selectbox",
+                    )
                 )
+
+                if st.button("Open Selected Folder", key="server_upload_open_folder"):
+                    try:
+                        child_snapshot = browse_remote_child(
+                            current_remote_path,
+                            selected_folder_name,
+                        )
+                        st.session_state["server_browser_snapshot"] = child_snapshot
+                        st.session_state["server_browser_error"] = ""
+                        st.session_state["server_selected_remote_path"] = child_snapshot.get("current_path", "")
+                        st.rerun()
+                    except Exception as e:
+                        st.session_state["server_browser_error"] = str(e)
+                        st.rerun()
+            else:
+                st.info("No subfolders found in this directory.")
+
+        with folder_tool_col2:
+            st.markdown("### Create New Folder")
+
+            new_folder_name = st.text_input(
+                "Folder Name",
+                key="server_upload_new_folder_name",
+                placeholder="e.g. new_lectures",
             )
 
-            if st.button("Open Selected Folder", key="server_upload_open_folder"):
-                current_remote_path: str = str(snapshot.get("current_path", "/"))
+            if st.button("Create Folder In Current Directory", key="server_upload_create_folder_button"):
+                try:
+                    result = create_remote_folder(
+                        current_path=current_remote_path,
+                        folder_name=new_folder_name,
+                    )
 
-                child_snapshot = browse_remote_child(
-                    current_remote_path,
-                    selected_folder_name,
+                    st.session_state["server_browser_snapshot"] = result["snapshot"]
+                    st.session_state["server_browser_error"] = ""
+                    st.session_state["server_selected_remote_path"] = result["snapshot"].get("current_path", "")
+                    st.session_state["server_upload_notice"] = f"Folder created: {result['created_folder_name']}"
+                    st.session_state["server_upload_notice_level"] = "success"
+                    st.rerun()
+                except Exception as e:
+                    st.session_state["server_upload_notice"] = f"Create folder failed: {e}"
+                    st.session_state["server_upload_notice_level"] = "error"
+                    st.rerun()
+
+        # ------------------------------------------
+        # Search + delete file
+        # ------------------------------------------
+        file_tool_col1, file_tool_col2 = st.columns(2)
+
+        with file_tool_col1:
+            st.markdown("### Search Remote Videos")
+
+            search_query = st.text_input(
+                "Search by filename",
+                key="server_upload_search_query",
+                placeholder="e.g. quran, episode, mp4",
+            )
+
+            show_videos_only = st.checkbox(
+                "Show videos only",
+                value=True,
+                key="server_upload_videos_only_checkbox",
+            )
+
+        with file_tool_col2:
+            st.markdown("### Delete Remote File")
+
+            remote_files = snapshot.get("files", [])
+            remote_file_options = [str(file.get("path", "")) for file in remote_files if file.get("path")]
+
+            if remote_file_options:
+                selected_delete_path = st.selectbox(
+                    "Select File To Delete",
+                    options=remote_file_options,
+                    format_func=lambda p: Path(str(p)).name,
+                    key="server_upload_delete_file_selectbox",
                 )
 
-                st.session_state["server_browser_snapshot"] = child_snapshot
-                st.session_state["server_browser_error"] = ""
-                st.session_state["server_selected_remote_path"] = str(child_snapshot.get("current_path", ""))
-                st.rerun()
-        else:
-            st.info("No subfolders found in this directory.")
+                confirm_delete = st.checkbox(
+                    "I understand this will permanently delete the selected remote file",
+                    value=False,
+                    key="server_upload_confirm_delete_checkbox",
+                )
 
+                if st.button("Delete Selected File", key="server_upload_delete_file_button"):
+                    if not confirm_delete:
+                        st.warning("Please confirm deletion first.")
+                    else:
+                        try:
+                            delete_result = delete_remote_file(
+                                remote_file_path=selected_delete_path,
+                                current_path=current_remote_path,
+                            )
+
+                            st.session_state["server_browser_snapshot"] = delete_result["snapshot"]
+                            st.session_state["server_browser_error"] = ""
+                            st.session_state["server_selected_remote_path"] = delete_result["snapshot"].get("current_path", "")
+                            st.session_state["server_upload_notice"] = f"Deleted file: {delete_result['deleted_file_name']}"
+                            st.session_state["server_upload_notice_level"] = "success"
+                            st.rerun()
+                        except Exception as e:
+                            st.session_state["server_upload_notice"] = f"Delete failed: {e}"
+                            st.session_state["server_upload_notice_level"] = "error"
+                            st.rerun()
+            else:
+                st.info("No files available in this folder to delete.")
+
+        # ------------------------------------------
+        # Filtered file list
+        # ------------------------------------------
         st.markdown("### Files In Selected Remote Folder")
 
-        remote_files = snapshot.get("files", [])
-        if remote_files:
+        filtered_files = filter_remote_files_in_snapshot(
+            snapshot=snapshot,
+            query=search_query,
+            videos_only=show_videos_only,
+        )
+
+        if filtered_files:
             file_rows = []
-            for file in remote_files:
+            for file in filtered_files:
                 file_rows.append(
                     {
                         "filename": file.get("name", ""),
@@ -1635,14 +1798,15 @@ with server_upload_tab:
                 )
 
             st.dataframe(file_rows, use_container_width=True)
+            st.caption(f"Showing {len(file_rows)} file(s) after filtering.")
         else:
-            st.info("No files found in this folder.")
+            st.info("No matching files found in this folder.")
 
+        # ------------------------------------------
+        # Upload section
+        # ------------------------------------------
         st.markdown("### Upload Target")
-
-        st.success(
-            f"Selected upload folder: {snapshot.get('current_path', '/')}"
-        )
+        st.success(f"Selected upload folder: {current_remote_path}")
 
         st.markdown("### Local Video Selection")
 
@@ -1683,24 +1847,23 @@ with server_upload_tab:
                 )
 
             st.dataframe(preview_rows, use_container_width=True)
-        
+
         overwrite_existing = st.checkbox(
             "Overwrite existing files on server",
             value=False,
             key="server_upload_overwrite_checkbox",
         )
-        
+
         if st.button("Upload Videos To Selected Folder", key="server_upload_start_button"):
             if not uploaded_server_videos:
                 st.warning("Please choose one or more video files first.")
             else:
                 try:
-                    selected_remote_dir = str(snapshot.get("current_path", "/"))
                     progress_callback = create_progress_reporter("server_upload_progress")
 
                     result = upload_streamlit_video_files(
                         uploaded_files=uploaded_server_videos,
-                        remote_dir=selected_remote_dir,
+                        remote_dir=current_remote_path,
                         rename_map=rename_map,
                         overwrite=overwrite_existing,
                         progress_callback=progress_callback,
@@ -1708,23 +1871,25 @@ with server_upload_tab:
 
                     st.session_state["server_upload_result"] = result
 
-                    refreshed_snapshot = browse_remote_directory(selected_remote_dir)
+                    refreshed_snapshot = browse_remote_directory(current_remote_path)
                     st.session_state["server_browser_snapshot"] = refreshed_snapshot
                     st.session_state["server_browser_error"] = ""
                     st.session_state["server_selected_remote_path"] = refreshed_snapshot.get("current_path", "")
 
                     if result.get("ok", False):
-                        st.success("Video upload completed successfully.")
+                        st.session_state["server_upload_notice"] = "Video upload completed successfully."
+                        st.session_state["server_upload_notice_level"] = "success"
                     else:
-                        st.warning("Upload completed with some failed files.")
+                        st.session_state["server_upload_notice"] = "Upload completed with some failed files."
+                        st.session_state["server_upload_notice_level"] = "warning"
 
                     st.rerun()
 
                 except Exception as e:
                     st.error(f"Upload failed: {e}")
-        
+
         upload_result = st.session_state.get("server_upload_result")
-        
+
         if upload_result:
             st.markdown("### Upload Result Summary")
 
@@ -1745,3 +1910,4 @@ with server_upload_tab:
             result_rows = upload_result.get("results", [])
             if result_rows:
                 st.dataframe(result_rows, use_container_width=True)
+
