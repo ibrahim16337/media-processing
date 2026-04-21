@@ -58,6 +58,13 @@ from app.pipelines.metadata_generation_pipeline.transcript_sources import (
     get_excel_sheet_names,
     get_excel_columns,
 )
+from app.config.server_upload_config import get_server_upload_config
+from app.pipelines.workflow_pipeline.server_upload_workflows import (
+    browse_remote_root,
+    browse_remote_directory,
+    browse_remote_parent,
+    browse_remote_child,
+)
 
 # --------------------------------------------------
 # Ensure directories exist
@@ -85,6 +92,10 @@ st.session_state.setdefault("metadata_single_result", None)
 st.session_state.setdefault("metadata_batch_result", None)
 st.session_state.setdefault("metadata_playlist_result", None)
 st.session_state.setdefault("metadata_existing_result", None)
+
+st.session_state.setdefault("server_browser_snapshot", None)
+st.session_state.setdefault("server_browser_error", "")
+st.session_state.setdefault("server_selected_remote_path", "")
 
 # --------------------------------------------------
 # Constants
@@ -471,15 +482,28 @@ def render_playlist_management_ui(key_prefix: str):
             st.success(msg)
         else:
             st.warning(msg)
+            
+def load_server_browser_snapshot(remote_path: str | None = None):
+    try:
+        snapshot = browse_remote_directory(remote_path) if remote_path else browse_remote_root()
+        st.session_state["server_browser_snapshot"] = snapshot
+        st.session_state["server_browser_error"] = ""
+        st.session_state["server_selected_remote_path"] = snapshot.get("current_path", "")
+        return snapshot
+    except Exception as e:
+        st.session_state["server_browser_snapshot"] = None
+        st.session_state["server_browser_error"] = str(e)
+        return None
 
 
 # --------------------------------------------------
 # Tabs
 # --------------------------------------------------
 
-transcription_tab, metadata_tab = st.tabs([
+transcription_tab, metadata_tab, server_upload_tab = st.tabs([
     "Transcription",
     "Metadata / SEO",
+    "Server Upload",
 ])
 
 # ==================================================
@@ -1466,3 +1490,165 @@ with metadata_tab:
         existing_result = st.session_state.get("metadata_existing_result")
         if existing_result:
             render_metadata_outputs(existing_result.get("metadata", {}) or existing_result, "metadata_existing_outputs")
+            
+# ==================================================
+# TAB 3 — SERVER UPLOAD
+# ==================================================
+
+with server_upload_tab:
+    st.subheader("Server Upload")
+
+    config_col1, config_col2, config_col3 = st.columns(3)
+
+    try:
+        upload_config = get_server_upload_config()
+
+        with config_col1:
+            st.info(f"**Protocol:** {upload_config.protocol.upper()}")
+
+        with config_col2:
+            st.info(f"**Host:** {upload_config.host}")
+
+        with config_col3:
+            st.info(f"**Remote Root:** {upload_config.remote_root}")
+
+    except Exception as e:
+        st.error(f"Server config error: {e}")
+        upload_config = None
+
+    browser_action_col1, browser_action_col2 = st.columns(2)
+
+    with browser_action_col1:
+        if st.button("Load Server Root", key="server_upload_load_root"):
+            root_snapshot = browse_remote_root()
+            st.session_state["server_browser_snapshot"] = root_snapshot
+            st.session_state["server_browser_error"] = ""
+            st.session_state["server_selected_remote_path"] = root_snapshot.get("current_path", "")
+            st.rerun()
+
+    with browser_action_col2:
+        if st.button("Refresh Current Folder", key="server_upload_refresh_current"):
+            current_path = st.session_state.get("server_selected_remote_path", "")
+            refreshed_snapshot = browse_remote_directory(current_path or "/")
+            st.session_state["server_browser_snapshot"] = refreshed_snapshot
+            st.session_state["server_browser_error"] = ""
+            st.session_state["server_selected_remote_path"] = refreshed_snapshot.get("current_path", "")
+            st.rerun()
+
+    browser_error = st.session_state.get("server_browser_error", "")
+    if browser_error:
+        st.error(f"Server browser error: {browser_error}")
+
+    snapshot = st.session_state.get("server_browser_snapshot")
+
+    if snapshot is None and upload_config is not None:
+        snapshot = load_server_browser_snapshot()
+
+    if snapshot:
+        st.markdown("### Current Remote Location")
+        st.write(f"**Current Path:** `{snapshot.get('current_path', '/')}`")
+
+        breadcrumbs = snapshot.get("breadcrumbs", [])
+        if breadcrumbs:
+            breadcrumb_labels = "  /  ".join(
+                [f"`{crumb['name']}`" for crumb in breadcrumbs]
+            )
+            st.markdown(f"**Breadcrumbs:** {breadcrumb_labels}")
+
+        stats_col1, stats_col2, stats_col3 = st.columns(3)
+
+        with stats_col1:
+            st.metric("Folders", snapshot.get("folder_count", 0))
+
+        with stats_col2:
+            st.metric("Files", snapshot.get("file_count", 0))
+
+        with stats_col3:
+            st.metric("Videos", snapshot.get("video_count", 0))
+
+        nav_col1, nav_col2 = st.columns(2)
+
+        with nav_col1:
+            parent_path = snapshot.get("parent_path")
+            if parent_path:
+                if st.button("Go To Parent Folder", key="server_upload_go_parent"):
+                    parent_snapshot = browse_remote_parent(snapshot.get("current_path", "/"))
+                    st.session_state["server_browser_snapshot"] = parent_snapshot
+                    st.session_state["server_browser_error"] = ""
+                    st.session_state["server_selected_remote_path"] = parent_snapshot.get("current_path", "")
+                    st.rerun()
+
+        with nav_col2:
+            if st.button("Reload This Folder", key="server_upload_reload_folder"):
+                refreshed_snapshot = browse_remote_directory(snapshot.get("current_path", "/"))
+                st.session_state["server_browser_snapshot"] = refreshed_snapshot
+                st.session_state["server_browser_error"] = ""
+                st.session_state["server_selected_remote_path"] = refreshed_snapshot.get("current_path", "")
+                st.rerun()
+
+        st.markdown("### Remote Folders")
+
+        folders = snapshot.get("folders", [])
+        if folders:
+            folder_names: list[str] = [str(folder.get("name", "")) for folder in folders if folder.get("name")]
+
+            selected_folder_name: str = str(
+                st.selectbox(
+                    "Select Folder To Open",
+                    options=folder_names,
+                    key="server_upload_folder_selectbox",
+                )
+            )
+
+            if st.button("Open Selected Folder", key="server_upload_open_folder"):
+                current_remote_path: str = str(snapshot.get("current_path", "/"))
+
+                child_snapshot = browse_remote_child(
+                    current_remote_path,
+                    selected_folder_name,
+                )
+
+                st.session_state["server_browser_snapshot"] = child_snapshot
+                st.session_state["server_browser_error"] = ""
+                st.session_state["server_selected_remote_path"] = str(child_snapshot.get("current_path", ""))
+                st.rerun()
+        else:
+            st.info("No subfolders found in this directory.")
+
+        st.markdown("### Files In Selected Remote Folder")
+
+        remote_files = snapshot.get("files", [])
+        if remote_files:
+            file_rows = []
+            for file in remote_files:
+                file_rows.append(
+                    {
+                        "filename": file.get("name", ""),
+                        "type": "Video" if file.get("is_video", False) else "File",
+                        "size_bytes": file.get("size_bytes", 0),
+                        "modified": file.get("modified", ""),
+                        "remote_path": file.get("path", ""),
+                    }
+                )
+
+            st.dataframe(file_rows, use_container_width=True)
+        else:
+            st.info("No files found in this folder.")
+
+        st.markdown("### Upload Target")
+
+        st.success(
+            f"Selected upload folder: {snapshot.get('current_path', '/')}"
+        )
+
+        st.markdown("### Local Video Selection")
+
+        st.file_uploader(
+            "Browse your PC and select one or multiple video files",
+            accept_multiple_files=True,
+            type=["mp4", "mkv", "mov", "avi", "webm"],
+            key="server_upload_video_picker_preview_only",
+            help="Upload functionality will be added in the next step. This step only builds the browser UI.",
+        )
+
+        st.info("Next step: add local file rename + actual upload to the selected remote folder.")
