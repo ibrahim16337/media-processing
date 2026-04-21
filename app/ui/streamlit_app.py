@@ -64,6 +64,7 @@ from app.pipelines.workflow_pipeline.server_upload_workflows import (
     browse_remote_directory,
     browse_remote_parent,
     browse_remote_child,
+    upload_streamlit_video_files,
 )
 
 # --------------------------------------------------
@@ -96,6 +97,8 @@ st.session_state.setdefault("metadata_existing_result", None)
 st.session_state.setdefault("server_browser_snapshot", None)
 st.session_state.setdefault("server_browser_error", "")
 st.session_state.setdefault("server_selected_remote_path", "")
+
+st.session_state.setdefault("server_upload_result", None)
 
 # --------------------------------------------------
 # Constants
@@ -1643,12 +1646,102 @@ with server_upload_tab:
 
         st.markdown("### Local Video Selection")
 
-        st.file_uploader(
+        uploaded_server_videos = st.file_uploader(
             "Browse your PC and select one or multiple video files",
             accept_multiple_files=True,
             type=["mp4", "mkv", "mov", "avi", "webm"],
-            key="server_upload_video_picker_preview_only",
-            help="Upload functionality will be added in the next step. This step only builds the browser UI.",
+            key="server_upload_video_picker",
         )
 
-        st.info("Next step: add local file rename + actual upload to the selected remote folder.")
+        rename_map: dict[str, str] = {}
+
+        if uploaded_server_videos:
+            st.markdown("### Rename Before Upload")
+
+            preview_rows = []
+
+            for idx, uploaded_file in enumerate(uploaded_server_videos):
+                original_name = Path(uploaded_file.name).name
+                original_stem = Path(original_name).stem
+                original_suffix = Path(original_name).suffix
+
+                new_stem = st.text_input(
+                    f"Rename: {original_name}",
+                    value=original_stem,
+                    key=f"server_upload_rename_{idx}_{original_name}",
+                ).strip()
+
+                final_name = f"{new_stem or original_stem}{original_suffix}"
+                rename_map[original_name] = final_name
+
+                preview_rows.append(
+                    {
+                        "original_name": original_name,
+                        "upload_name": final_name,
+                        "size_bytes": getattr(uploaded_file, "size", 0),
+                    }
+                )
+
+            st.dataframe(preview_rows, use_container_width=True)
+        
+        overwrite_existing = st.checkbox(
+            "Overwrite existing files on server",
+            value=False,
+            key="server_upload_overwrite_checkbox",
+        )
+        
+        if st.button("Upload Videos To Selected Folder", key="server_upload_start_button"):
+            if not uploaded_server_videos:
+                st.warning("Please choose one or more video files first.")
+            else:
+                try:
+                    selected_remote_dir = str(snapshot.get("current_path", "/"))
+                    progress_callback = create_progress_reporter("server_upload_progress")
+
+                    result = upload_streamlit_video_files(
+                        uploaded_files=uploaded_server_videos,
+                        remote_dir=selected_remote_dir,
+                        rename_map=rename_map,
+                        overwrite=overwrite_existing,
+                        progress_callback=progress_callback,
+                    )
+
+                    st.session_state["server_upload_result"] = result
+
+                    refreshed_snapshot = browse_remote_directory(selected_remote_dir)
+                    st.session_state["server_browser_snapshot"] = refreshed_snapshot
+                    st.session_state["server_browser_error"] = ""
+                    st.session_state["server_selected_remote_path"] = refreshed_snapshot.get("current_path", "")
+
+                    if result.get("ok", False):
+                        st.success("Video upload completed successfully.")
+                    else:
+                        st.warning("Upload completed with some failed files.")
+
+                    st.rerun()
+
+                except Exception as e:
+                    st.error(f"Upload failed: {e}")
+        
+        upload_result = st.session_state.get("server_upload_result")
+        
+        if upload_result:
+            st.markdown("### Upload Result Summary")
+
+            result_col1, result_col2, result_col3, result_col4 = st.columns(4)
+
+            with result_col1:
+                st.metric("Total Files", upload_result.get("total_files", 0))
+
+            with result_col2:
+                st.metric("Uploaded", upload_result.get("uploaded_count", 0))
+
+            with result_col3:
+                st.metric("Skipped", upload_result.get("skipped_count", 0))
+
+            with result_col4:
+                st.metric("Failed", upload_result.get("failed_count", 0))
+
+            result_rows = upload_result.get("results", [])
+            if result_rows:
+                st.dataframe(result_rows, use_container_width=True)

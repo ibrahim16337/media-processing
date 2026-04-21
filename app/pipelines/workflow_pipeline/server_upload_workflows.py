@@ -1,13 +1,21 @@
 from __future__ import annotations
 
 import posixpath
-from typing import Any
+import shutil
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Callable
 
+from app.config.paths import SERVER_UPLOAD_TEMP_DIR
 from app.config.server_upload_config import (
     get_server_upload_config,
     mask_server_upload_config,
 )
 from app.pipelines.server_upload_pipeline.server_client import SFTPServerClient
+from app.pipelines.server_upload_pipeline.upload_runner import upload_video_files
+
+
+ProgressCallback = Callable[[dict[str, Any]], None] | None
 
 
 def _safe_string(value: Any) -> str:
@@ -110,3 +118,64 @@ def browse_remote_child(current_path: str, child_folder_name: str) -> dict[str, 
     child_path = _normalize_remote_path(child_path)
 
     return browse_remote_directory(child_path)
+
+
+def upload_streamlit_video_files(
+    uploaded_files: list[Any],
+    remote_dir: str,
+    rename_map: dict[str, str] | None = None,
+    overwrite: bool = False,
+    progress_callback: ProgressCallback = None,
+) -> dict[str, Any]:
+    if not uploaded_files:
+        raise ValueError("No uploaded files were provided.")
+
+    rename_map = rename_map or {}
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    workspace = SERVER_UPLOAD_TEMP_DIR / f"upload_{timestamp}"
+    workspace.mkdir(parents=True, exist_ok=True)
+
+    staged_items: list[dict[str, Any]] = []
+
+    try:
+        for uploaded_file in uploaded_files:
+            original_name = Path(uploaded_file.name).name
+            local_path = workspace / original_name
+
+            with open(local_path, "wb") as f:
+                f.write(uploaded_file.getbuffer())
+
+            target_name = _safe_string(rename_map.get(original_name)) or original_name
+
+            staged_items.append(
+                {
+                    "local_path": local_path,
+                    "target_name": target_name,
+                    "original_name": original_name,
+                }
+            )
+
+        upload_result = upload_video_files(
+            upload_items=staged_items,
+            remote_dir=remote_dir,
+            overwrite=overwrite,
+            progress_callback=progress_callback,
+        )
+
+        return {
+            "ok": upload_result["ok"],
+            "remote_dir": upload_result["remote_dir"],
+            "workspace": str(workspace),
+            "total_files": upload_result["total_files"],
+            "uploaded_count": upload_result["uploaded_count"],
+            "skipped_count": upload_result["skipped_count"],
+            "failed_count": upload_result["failed_count"],
+            "results": upload_result["results"],
+        }
+
+    finally:
+        try:
+            shutil.rmtree(workspace, ignore_errors=True)
+        except Exception:
+            pass

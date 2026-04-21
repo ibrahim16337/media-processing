@@ -4,7 +4,8 @@ import posixpath
 import stat
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from pathlib import Path
+from typing import Any, Callable
 
 import paramiko
 
@@ -12,6 +13,7 @@ from app.config.server_upload_config import get_server_upload_config
 
 
 VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".avi", ".webm"}
+FileProgressCallback = Callable[[int, int], None] | None
 
 
 @dataclass(frozen=True)
@@ -167,3 +169,36 @@ class SFTPServerClient:
 
     def list_root(self) -> dict[str, Any]:
         return self.list_directory(self.config.remote_root)
+
+    def upload_file(
+        self,
+        local_path: str | Path,
+        remote_dir: str,
+        remote_filename: str | None = None,
+        progress_callback: FileProgressCallback = None,
+    ) -> dict[str, Any]:
+        sftp = self._require_sftp()
+
+        local_file = Path(local_path)
+        if not local_file.exists():
+            raise FileNotFoundError(f"Local file not found: {local_file}")
+
+        remote_dir = self.normalize_remote_path(remote_dir)
+        remote_filename = _safe_string(remote_filename) or local_file.name
+        remote_path = posixpath.join(remote_dir, remote_filename)
+
+        sftp.put(
+            str(local_file),
+            remote_path,
+            callback=progress_callback,
+            confirm=True,
+        )
+
+        stat_result = sftp.stat(remote_path)
+
+        return {
+            "remote_path": remote_path,
+            "remote_filename": remote_filename,
+            "size_bytes": int(getattr(stat_result, "st_size", 0) or 0),
+            "modified": _format_modified_time(getattr(stat_result, "st_mtime", None)),
+        }
