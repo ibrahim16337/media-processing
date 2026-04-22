@@ -1909,5 +1909,20 @@ with server_upload_tab:
 
             result_rows = upload_result.get("results", [])
             if result_rows:
-                st.dataframe(result_rows, use_container_width=True)
-
+                display_rows = []
+                
+                for row in result_rows:
+                    display_rows.append(
+                        {
+                            "original_name": row.get("original_name", ""),
+                            "uploaded_name": row.get("uploaded_name", ""),
+                            "remote_path": row.get("remote_path", ""),
+                            "public_url": row.get("public_url", ""),
+                            "size_bytes": row.get("size_bytes", 0),
+                            "modified": row.get("modified", ""),
+                            "status": row.get("status", ""),
+                            "reason": row.get("reason", ""),
+                        }
+                    )
+                    
+                st.dataframe(display_rows, use_container_width=True)

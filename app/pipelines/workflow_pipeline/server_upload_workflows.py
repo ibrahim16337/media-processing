@@ -5,6 +5,7 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import quote
 
 from app.config.paths import SERVER_UPLOAD_TEMP_DIR
 from app.config.server_upload_config import (
@@ -258,7 +259,18 @@ def upload_streamlit_video_files(
             overwrite=overwrite,
             progress_callback=progress_callback,
         )
-
+        
+        config = get_server_upload_config()
+        web_url = config.web_url
+        results_with_urls: list[dict[str, Any]] = []
+        
+        for row in upload_result["results"]:
+            row_copy = dict(row)
+            remote_path = _safe_string(row_copy.get("remote_path", ""))
+            row_copy["public_url"] = _build_public_file_url(web_url, remote_path) if remote_path else ""
+            results_with_urls.append(row_copy)
+        
+        
         return {
             "ok": upload_result["ok"],
             "remote_dir": upload_result["remote_dir"],
@@ -267,7 +279,7 @@ def upload_streamlit_video_files(
             "uploaded_count": upload_result["uploaded_count"],
             "skipped_count": upload_result["skipped_count"],
             "failed_count": upload_result["failed_count"],
-            "results": upload_result["results"],
+            "results": results_with_urls,
         }
 
     finally:
@@ -275,3 +287,21 @@ def upload_streamlit_video_files(
             shutil.rmtree(workspace, ignore_errors=True)
         except Exception:
             pass
+
+
+def _normalize_web_base_url(web_url: str) -> str:
+    value = _safe_string(web_url)
+    if not value:
+        return ""
+    return value.rstrip("/")
+
+
+def _build_public_file_url(web_url: str, remote_path: str) -> str:
+    base = _normalize_web_base_url(web_url)
+    normalized_remote_path = _normalize_remote_path(remote_path)
+
+    if not base:
+        return ""
+
+    encoded_path = quote(normalized_remote_path, safe="/-_.~")
+    return f"{base}{encoded_path}"
