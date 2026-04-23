@@ -288,14 +288,28 @@ def transcribe_single_youtube(
 
     transcript_file = _build_transcript_path(wav_file, transcript_output_dir)
 
+    transcript_exists = transcript_file.exists()
+    transcript_text = ""
+
+    if transcript_exists:
+        try:
+            transcript_text = transcript_file.read_text(encoding="utf-8").strip()
+        except Exception:
+            transcript_text = ""
+            
+    final_ok = bool(
+        transcription_result.get("ok", False) or
+        (transcript_exists and bool(transcript_text))
+    )
+    
     return {
-        "ok": transcription_result["ok"],
+        "ok": final_ok,
         "mode": "single_youtube",
         "youtube_url": youtube_url,
         "downloaded_audio": str(downloaded_audio),
         "wav_file": str(wav_file),
         "transcript_file": str(transcript_file),
-        "transcript_exists": transcript_file.exists(),
+        "transcript_exists": transcript_exists,
         "download_time_sec": download_time,
         "standardize_time_sec": standardize_time,
         "transcription_time_sec": transcription_result["elapsed_sec"],

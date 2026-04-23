@@ -552,10 +552,16 @@ with transcription_tab:
 
                         st.session_state["transcription_single_result"] = result
 
+                        transcript_file = Path(result.get("transcript_file", ""))
+                        transcript_exists = transcript_file.exists()
+                        
                         if result.get("ok", False):
                             st.success("Transcription completed successfully.")
+                        elif transcript_exists:
+                            st.warning("Transcript file was created, but the process exited with a warning/error after saving.")
                         else:
-                            st.error("Transcription failed.")
+                            st.error(result.get("error", "Transcription failed."))
+                        
                     except Exception as e:
                         st.error(f"Error: {e}")
 
