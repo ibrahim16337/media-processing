@@ -35,8 +35,11 @@ METADATA_EXCEL_IMPORT_DIR = METADATA_OUTPUT_DIR / "excel_imports"
 # Model directories
 # ---------------------------------------------------
 
-MODEL_DIR = BASE_DIR / "models"
-WHISPER_CACHE_DIR = MODEL_DIR / "whisper_cache"
+MODEL_DIR = BASE_DIR / "models"   # keep for backward compatibility
+
+AI_MODELS_DIR = Path(r"D:\AI_Models")
+WHISPER_BASE_DIR = AI_MODELS_DIR / "whisper"
+WHISPER_CACHE_DIR = WHISPER_BASE_DIR / "faster_whisper_cache"
 
 # ---------------------------------------------------
 # Logs
@@ -49,6 +52,7 @@ LOG_DIR = BASE_DIR / "logs"
 # ---------------------------------------------------
 
 TEMP_DIR = DATA_DIR / "temp"
+TEMP_SINGLE_BATCH_DIR = TEMP_DIR / "single_batch"
 SERVER_UPLOAD_TEMP_DIR = TEMP_DIR / "server_upload"
 
 # ---------------------------------------------------
@@ -58,12 +62,23 @@ SERVER_UPLOAD_TEMP_DIR = TEMP_DIR / "server_upload"
 DATASET_DIR = DATA_DIR / "dataset"
 
 # ---------------------------------------------------
-# External tools
+# External tools / machine-specific paths
+# Change only these when moving to another PC
 # ---------------------------------------------------
 
 FFMPEG_DIR = Path(r"D:\tools\ffmpeg\bin")
 FFMPEG_EXE = FFMPEG_DIR / "ffmpeg.exe"
 FFPROBE_EXE = FFMPEG_DIR / "ffprobe.exe"
+
+CUDA_BIN_DIR = Path(r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin")
+
+# ---------------------------------------------------
+# Internal important file paths
+# ---------------------------------------------------
+
+TRANSCRIBER_ENGINE_PATH = (
+    BASE_DIR / "app" / "pipelines" / "transcription_pipeline" / "transcriber_engine.py"
+)
 
 
 def slugify(value: str) -> str:
@@ -114,6 +129,7 @@ def build_playlist_paths(playlist_name: str) -> PlaylistPaths:
         WHISPER_CACHE_DIR,
         LOG_DIR,
         TEMP_DIR,
+        TEMP_SINGLE_BATCH_DIR,
         SERVER_UPLOAD_TEMP_DIR,
         DATASET_DIR,
         paths.root,
@@ -149,6 +165,7 @@ dirs = [
     WHISPER_CACHE_DIR,
     LOG_DIR,
     TEMP_DIR,
+    TEMP_SINGLE_BATCH_DIR,
     SERVER_UPLOAD_TEMP_DIR,
     DATASET_DIR,
 ]

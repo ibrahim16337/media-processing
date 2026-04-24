@@ -1,13 +1,28 @@
 import os
-import io
 import sys
+import io
 import time
 import argparse
 import threading
 from queue import Queue, Empty, Full
 from pathlib import Path
 
+# --------------------------------------------------
+# Ensure project root is importable when this file
+# is executed directly as a script
+# --------------------------------------------------
+
+ROOT_DIR = Path(__file__).resolve().parents[3]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
 from faster_whisper import WhisperModel, BatchedInferencePipeline
+
+from app.config.paths import (
+    CUDA_BIN_DIR,
+    TRANSCRIPT_DIR,
+    WHISPER_CACHE_DIR,
+)
 
 # --------------------------------------------------
 # Windows / Unicode-safe stdout-stderr
@@ -23,7 +38,8 @@ except Exception:
     pass
 
 try:
-    os.add_dll_directory(r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin")
+    if CUDA_BIN_DIR.exists():
+        os.add_dll_directory(str(CUDA_BIN_DIR))
 except Exception:
     pass
 
@@ -305,7 +321,7 @@ def main():
     ap = argparse.ArgumentParser(description="GPU-only transcription")
 
     ap.add_argument("input")
-    ap.add_argument("-o", "--output_dir", default="data/transcripts")
+    ap.add_argument("-o", "--output_dir", default=str(TRANSCRIPT_DIR))
     ap.add_argument("--model", default="large-v3")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--compute_type", default="float16")
@@ -334,7 +350,7 @@ def main():
     )
 
     ap.add_argument("--beam_size", type=int, default=5)
-    ap.add_argument("--batch_size", type=int, default=6)   # RTX 4060 8GB safe
+    ap.add_argument("--batch_size", type=int, default=6)
     ap.add_argument("--chunk_length", type=int, default=None)
     ap.add_argument("--vad", action="store_true")
     ap.add_argument("--vad_min_silence_ms", type=int, default=500)
@@ -353,7 +369,7 @@ def main():
 
     ap.add_argument(
         "--cache_dir",
-        default=r"D:\AI_MODELS\whisper\faster_whisper_cache",
+        default=str(WHISPER_CACHE_DIR),
     )
 
     ap.add_argument("--local_only", action="store_true")
@@ -418,7 +434,7 @@ def main():
 
     if not error_queue.empty():
         fatal_message = error_queue.get()
-        print(f"\\nFATAL: {fatal_message}")
+        print(f"\nFATAL: {fatal_message}")
         sys.exit(1)
 
     elapsed = time.time() - start

@@ -4,9 +4,11 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from app.config.paths import (
+    TRANSCRIBER_ENGINE_PATH,
+    WHISPER_CACHE_DIR,
+)
 
-ROOT = Path(__file__).resolve().parents[3]
-ENGINE_PATH = ROOT / "app" / "pipelines" / "transcription_pipeline" / "transcriber_engine.py"
 
 DEFAULT_LECTURE_PROMPT = (
     "This is an Urdu lecture with frequent English, Arabic, and Persian words. "
@@ -61,8 +63,8 @@ def build_transcription_cmd(
     model="large-v3",
     device="cuda",
     compute_type="float16",
-    batch_size=6,           # RTX 4060 8GB laptop safe tuning
-    beam_size=5,            # unchanged
+    batch_size=6,
+    beam_size=5,
     vad=True,
     recursive=True,
     local_only=True,
@@ -71,24 +73,21 @@ def build_transcription_cmd(
     overwrite=False,
     chunk_length=20,
     vad_min_silence_ms=500,
-    cache_dir=None,
-    decode_mode="batched",  # staged single-file flow + batch folders
+    cache_dir=WHISPER_CACHE_DIR,
+    decode_mode="batched",
     initial_prompt=DEFAULT_LECTURE_PROMPT,
     hotwords=DEFAULT_LECTURE_HOTWORDS,
 ):
     input_path = Path(input_folder)
     output_dir = Path(output_dir)
 
-    # If a caller directly passes a single file, use single mode.
-    # In the workflow, single jobs are staged into a temp folder,
-    # so they still use batched mode there.
     effective_decode_mode = str(decode_mode)
     if input_path.is_file():
         effective_decode_mode = "single"
 
     cmd = [
         sys.executable,
-        str(ENGINE_PATH),
+        str(TRANSCRIBER_ENGINE_PATH),
         str(input_path),
         "-o",
         str(output_dir),
@@ -110,9 +109,12 @@ def build_transcription_cmd(
         str(effective_decode_mode),
     ]
 
+    model_is_in_cache = False
+
     if cache_dir:
         cache_path = Path(cache_dir)
-        if _cache_dir_has_requested_model(cache_path, model):
+        model_is_in_cache = _cache_dir_has_requested_model(cache_path, model)
+        if model_is_in_cache:
             cmd.extend(["--cache_dir", str(cache_path)])
 
     if vad:
@@ -121,7 +123,7 @@ def build_transcription_cmd(
     if recursive:
         cmd.append("--recursive")
 
-    if local_only:
+    if local_only and model_is_in_cache:
         cmd.append("--local_only")
 
     if multilingual:
