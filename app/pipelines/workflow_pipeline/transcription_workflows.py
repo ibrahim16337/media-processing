@@ -3,12 +3,14 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import time
 from pathlib import Path
 from typing import Any, Callable
 
 from app.config.paths import (
+    TEMP_DIR,
     TRANSCRIPT_DIR,
     UPLOAD_AUDIO_DIR,
     UPLOAD_VIDEO_DIR,
@@ -89,6 +91,78 @@ def _write_video_meta_sidecar(media_path: Path, metadata: dict[str, Any]) -> Pat
         encoding="utf-8",
     )
     return sidecar_path
+
+
+def _resolve_generated_transcript_file(
+    expected_path: Path,
+    output_dir: Path,
+    source_audio_path: Path,
+    output_lines: list[str] | None = None,
+) -> Path:
+    expected_path = Path(expected_path)
+    output_dir = Path(output_dir)
+    source_audio_path = Path(source_audio_path)
+
+    if expected_path.exists():
+        return expected_path
+
+    lines = output_lines or []
+
+    for line in reversed(lines):
+        lower_line = str(line).lower()
+        if "saved:" not in lower_line:
+            continue
+
+        try:
+            saved_part = str(line).split("saved:", 1)[1].strip()
+            candidate = Path(saved_part)
+
+            if not candidate.is_absolute():
+                candidate = output_dir / candidate.name
+
+            if candidate.exists() and candidate.suffix.lower() == ".txt":
+                return candidate
+        except Exception:
+            pass
+
+    txt_files = sorted(
+        [p for p in output_dir.glob("*.txt") if p.is_file()],
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+
+    source_stem = source_audio_path.stem.lower()
+
+    for txt_file in txt_files:
+        if txt_file.stem.lower() == source_stem:
+            return txt_file
+
+    if txt_files:
+        return txt_files[0]
+
+    return expected_path
+
+
+def _read_text_if_exists(path: Path) -> str:
+    if not path.exists():
+        return ""
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except Exception:
+        return ""
+
+
+def _extract_error_message(transcription_result: dict[str, Any]) -> str:
+    lines = transcription_result.get("output_lines", []) or []
+    if not lines:
+        return "Transcription failed."
+
+    for line in reversed(lines):
+        text = _safe_string(line)
+        if text:
+            return text
+
+    return "Transcription failed."
 
 
 def _run_transcription_subprocess(
@@ -179,7 +253,57 @@ def _run_transcription_subprocess(
         "progress_percent": last_percent if success else 0.0,
         "output_lines": output_lines,
         "cmd": cmd,
+        "error": "" if success else _extract_error_message({"output_lines": output_lines}),
     }
+
+
+def _stage_file_for_batched_decode(source_file: Path, staged_file: Path) -> None:
+    """
+    Try hard-link first for speed, then fall back to copy.
+    """
+    staged_file.parent.mkdir(parents=True, exist_ok=True)
+
+    if staged_file.exists():
+        try:
+            staged_file.unlink()
+        except Exception:
+            pass
+
+    try:
+        os.link(source_file, staged_file)
+        return
+    except Exception:
+        pass
+
+    shutil.copy2(source_file, staged_file)
+
+
+def _run_single_file_via_temp_batched_folder(
+    input_wav: Path,
+    output_dir: Path,
+    progress_callback: ProgressCallback = None,
+    stage_start_percent: float = 0.0,
+    stage_end_percent: float = 100.0,
+) -> dict[str, Any]:
+    """
+    Stage a single WAV into a temp folder so the engine can use batched decode
+    while still producing a normal transcript file.
+    """
+    temp_batch_dir = TEMP_DIR / f"single_batch_{int(time.time() * 1000)}"
+    staged_wav = temp_batch_dir / input_wav.name
+
+    try:
+        _stage_file_for_batched_decode(input_wav, staged_wav)
+
+        return _run_transcription_subprocess(
+            input_path=temp_batch_dir,
+            output_dir=output_dir,
+            progress_callback=progress_callback,
+            stage_start_percent=stage_start_percent,
+            stage_end_percent=stage_end_percent,
+        )
+    finally:
+        shutil.rmtree(temp_batch_dir, ignore_errors=True)
 
 
 def transcribe_single_youtube(
@@ -278,42 +402,50 @@ def transcribe_single_youtube(
         except Exception:
             wav_sidecar = None
 
-    transcription_result = _run_transcription_subprocess(
-        input_path=wav_file,
+    transcription_result = _run_single_file_via_temp_batched_folder(
+        input_wav=wav_file,
         output_dir=transcript_output_dir,
         progress_callback=progress_callback,
         stage_start_percent=35,
         stage_end_percent=100,
     )
 
-    transcript_file = _build_transcript_path(wav_file, transcript_output_dir)
+    expected_transcript_file = _build_transcript_path(wav_file, transcript_output_dir)
 
-    transcript_exists = transcript_file.exists()
-    transcript_text = ""
-
-    if transcript_exists:
-        try:
-            transcript_text = transcript_file.read_text(encoding="utf-8").strip()
-        except Exception:
-            transcript_text = ""
-            
-    final_ok = bool(
-        transcription_result.get("ok", False) or
-        (transcript_exists and bool(transcript_text))
+    resolved_transcript_file = _resolve_generated_transcript_file(
+        expected_path=expected_transcript_file,
+        output_dir=transcript_output_dir,
+        source_audio_path=wav_file,
+        output_lines=transcription_result.get("output_lines", []),
     )
-    
+
+    transcript_text = _read_text_if_exists(resolved_transcript_file)
+    transcript_exists = resolved_transcript_file.exists()
+
+    if transcript_exists and resolved_transcript_file != expected_transcript_file:
+        try:
+            if not expected_transcript_file.exists():
+                expected_transcript_file.write_text(transcript_text, encoding="utf-8")
+            resolved_transcript_file = expected_transcript_file
+            transcript_exists = resolved_transcript_file.exists()
+        except Exception:
+            pass
+
+    final_ok = bool(resolved_transcript_file.exists())
+
     return {
         "ok": final_ok,
         "mode": "single_youtube",
         "youtube_url": youtube_url,
         "downloaded_audio": str(downloaded_audio),
         "wav_file": str(wav_file),
-        "transcript_file": str(transcript_file),
-        "transcript_exists": transcript_exists,
+        "transcript_file": str(resolved_transcript_file),
+        "transcript_exists": resolved_transcript_file.exists(),
         "download_time_sec": download_time,
         "standardize_time_sec": standardize_time,
         "transcription_time_sec": transcription_result["elapsed_sec"],
         "transcription": transcription_result,
+        "error": "" if final_ok else transcription_result.get("error", "Transcription failed."),
         "youtube_metadata": youtube_metadata,
         "downloaded_audio_sidecar": str(downloaded_sidecar) if downloaded_sidecar else "",
         "wav_sidecar": str(wav_sidecar) if wav_sidecar else "",
@@ -351,26 +483,48 @@ def transcribe_single_media_file(
         message="Standardization completed.",
     )
 
-    transcription_result = _run_transcription_subprocess(
-        input_path=wav_file,
+    transcription_result = _run_single_file_via_temp_batched_folder(
+        input_wav=wav_file,
         output_dir=transcript_output_dir,
         progress_callback=progress_callback,
         stage_start_percent=20,
         stage_end_percent=100,
     )
 
-    transcript_file = _build_transcript_path(wav_file, transcript_output_dir)
+    expected_transcript_file = _build_transcript_path(wav_file, transcript_output_dir)
+
+    resolved_transcript_file = _resolve_generated_transcript_file(
+        expected_path=expected_transcript_file,
+        output_dir=transcript_output_dir,
+        source_audio_path=wav_file,
+        output_lines=transcription_result.get("output_lines", []),
+    )
+
+    transcript_text = _read_text_if_exists(resolved_transcript_file)
+    transcript_exists = resolved_transcript_file.exists()
+
+    if transcript_exists and resolved_transcript_file != expected_transcript_file:
+        try:
+            if not expected_transcript_file.exists():
+                expected_transcript_file.write_text(transcript_text, encoding="utf-8")
+            resolved_transcript_file = expected_transcript_file
+            transcript_exists = resolved_transcript_file.exists()
+        except Exception:
+            pass
+
+    final_ok = bool(resolved_transcript_file.exists())
 
     return {
-        "ok": transcription_result["ok"],
+        "ok": final_ok,
         "mode": "single_media_file",
         "input_file": str(media_path),
         "wav_file": str(wav_file),
-        "transcript_file": str(transcript_file),
-        "transcript_exists": transcript_file.exists(),
+        "transcript_file": str(resolved_transcript_file),
+        "transcript_exists": resolved_transcript_file.exists(),
         "standardize_time_sec": standardize_time,
         "transcription_time_sec": transcription_result["elapsed_sec"],
         "transcription": transcription_result,
+        "error": "" if final_ok else transcription_result.get("error", "Transcription failed."),
     }
 
 
@@ -451,8 +605,13 @@ def transcribe_batch_media(
 
     transcript_files = _find_transcript_files(transcript_output_dir)
 
+    final_ok = bool(
+        transcription_result.get("ok", False)
+        or len(transcript_files) > 0
+    )
+
     return {
-        "ok": transcription_result["ok"],
+        "ok": final_ok,
         "mode": "batch_media",
         "audio_input_dir": str(audio_input_dir),
         "video_input_dir": str(video_input_dir),
@@ -464,6 +623,7 @@ def transcribe_batch_media(
         "standardize_time_sec": standardize_time,
         "transcription_time_sec": transcription_result["elapsed_sec"],
         "transcription": transcription_result,
+        "error": "" if final_ok else transcription_result.get("error", "Batch transcription failed."),
     }
 
 
@@ -547,7 +707,12 @@ def transcribe_playlist(
     transcript_files = _find_transcript_files(paths.transcripts)
 
     playlist_excel_path = None
-    if generate_playlist_excel_file and transcription_result["ok"]:
+    final_ok = bool(
+        transcription_result.get("ok", False)
+        or len(transcript_files) > 0
+    )
+
+    if generate_playlist_excel_file and final_ok:
         _emit_progress(
             progress_callback,
             stage="export",
@@ -572,7 +737,7 @@ def transcribe_playlist(
         )
 
     return {
-        "ok": transcription_result["ok"],
+        "ok": final_ok,
         "mode": "playlist",
         "playlist_url": playlist_url,
         "quality": quality,
@@ -588,4 +753,5 @@ def transcribe_playlist(
         "download_time_sec": download_time,
         "transcription_time_sec": transcription_result["elapsed_sec"],
         "transcription": transcription_result,
+        "error": "" if final_ok else transcription_result.get("error", "Playlist transcription failed."),
     }

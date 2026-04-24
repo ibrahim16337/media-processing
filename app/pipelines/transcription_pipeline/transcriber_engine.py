@@ -3,7 +3,7 @@ import sys
 import time
 import argparse
 import threading
-from queue import Queue
+from queue import Queue, Empty, Full
 from pathlib import Path
 
 from faster_whisper import WhisperModel, BatchedInferencePipeline
@@ -25,14 +25,12 @@ except Exception:
 
 AUDIO_EXTS = {".mp3", ".wav", ".m4a", ".flac", ".ogg", ".opus", ".aac", ".wma"}
 
-# Queue for producer → consumer pipeline
 job_queue = Queue(maxsize=8)
+error_queue = Queue(maxsize=1)
+stop_event = threading.Event()
 
 
 def safe_text(value):
-    """
-    Make sure filenames / labels never crash print() on Windows.
-    """
     text = str(value)
     try:
         text.encode(sys.stdout.encoding or "utf-8", errors="strict")
@@ -120,7 +118,7 @@ def live_iter_segments(segments_iter, total_duration, label):
 
 def build_transcribe_kwargs(args, language):
     kwargs = {
-        "language": language,  # None = auto detection
+        "language": language,
         "task": "transcribe",
         "beam_size": args.beam_size,
         "vad_filter": args.vad,
@@ -157,34 +155,54 @@ def transcribe_audio(transcriber, audio_path, args):
     return segments_iter, info
 
 
-# -----------------------------------
-# Producer thread (CPU)
-# -----------------------------------
+def report_fatal_error(message: str):
+    if error_queue.empty():
+        try:
+            error_queue.put_nowait(message)
+        except Exception:
+            pass
+    stop_event.set()
+
 
 def producer(files):
     for f in files:
+        if stop_event.is_set():
+            break
+
         print(f"[CPU] preparing {safe_text(f.name)}")
-        job_queue.put(f)
 
-    # signal completion
-    job_queue.put(None)
+        while not stop_event.is_set():
+            try:
+                job_queue.put(f, timeout=0.2)
+                break
+            except Full:
+                continue
+
+    while True:
+        try:
+            job_queue.put(None, timeout=0.2)
+            break
+        except Full:
+            if stop_event.is_set():
+                try:
+                    _ = job_queue.get_nowait()
+                except Empty:
+                    pass
+            continue
 
 
-# -----------------------------------
-# Consumer thread (GPU)
-# -----------------------------------
-
-def consumer(
-    transcriber,
-    out_dir,
-    args,
-    total_files
-):
+def consumer(transcriber, out_dir, args, total_files):
     ok = 0
     index = 1
 
     while True:
-        audio_file = job_queue.get()
+        if stop_event.is_set() and job_queue.empty():
+            break
+
+        try:
+            audio_file = job_queue.get(timeout=0.2)
+        except Empty:
+            continue
 
         if audio_file is None:
             break
@@ -242,10 +260,11 @@ def consumer(
                 else:
                     header_parts.append(f"Detected Language: {detected_language}")
 
-            if header_parts:
-                final_text = "\n".join(header_parts) + "\n\n" + transcript_text
-            else:
-                final_text = transcript_text
+            final_text = (
+                "\n".join(header_parts) + "\n\n" + transcript_text
+                if header_parts
+                else transcript_text
+            )
 
             atomic_write_text(out_path, final_text)
 
@@ -257,17 +276,25 @@ def consumer(
         except TypeError as e:
             msg = str(e)
             if "multilingual" in msg or "hotwords" in msg or "initial_prompt" in msg:
-                print("❌ Your installed faster-whisper version is too old for one of these arguments:")
-                print("   --multilingual / --hotwords / --initial_prompt")
-                print("Upgrade with: pip install -U faster-whisper")
-                sys.exit(1)
+                error_message = (
+                    "❌ Your installed faster-whisper version is too old for one of these arguments:\n"
+                    "   --multilingual / --hotwords / --initial_prompt\n"
+                    "Upgrade with: pip install -U faster-whisper"
+                )
+                print(error_message)
+                report_fatal_error(error_message)
+                return
             else:
-                print(f"❌ {safe_text(audio_file.name)}: {e}")
-                sys.exit(1)
+                error_message = f"❌ {safe_text(audio_file.name)}: {e}"
+                print(error_message)
+                report_fatal_error(error_message)
+                return
 
         except Exception as e:
-            print(f"❌ {safe_text(audio_file.name)}: {e}")
-            sys.exit(1)
+            error_message = f"❌ {safe_text(audio_file.name)}: {e}"
+            print(error_message)
+            report_fatal_error(error_message)
+            return
 
 
 def main():
@@ -283,7 +310,6 @@ def main():
     ap.add_argument("--recursive", action="store_true")
     ap.add_argument("--overwrite", action="store_true")
 
-    # Keep engine backward-safe. Runner can override these.
     ap.add_argument(
         "--language",
         default="ur",
@@ -303,8 +329,8 @@ def main():
         help="single = accuracy-first, batched = speed-first",
     )
 
-    ap.add_argument("--beam_size", type=int, default=2)
-    ap.add_argument("--batch_size", type=int, default=8)
+    ap.add_argument("--beam_size", type=int, default=5)
+    ap.add_argument("--batch_size", type=int, default=6)   # RTX 4060 8GB safe
     ap.add_argument("--chunk_length", type=int, default=None)
     ap.add_argument("--vad", action="store_true")
     ap.add_argument("--vad_min_silence_ms", type=int, default=500)
@@ -385,6 +411,11 @@ def main():
 
     producer_thread.join()
     consumer_thread.join()
+
+    if not error_queue.empty():
+        fatal_message = error_queue.get()
+        print(f"\\nFATAL: {fatal_message}")
+        sys.exit(1)
 
     elapsed = time.time() - start
     print(f"Done in {format_hms(elapsed)}")

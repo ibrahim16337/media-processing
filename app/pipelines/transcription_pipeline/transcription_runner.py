@@ -1,5 +1,8 @@
+from __future__ import annotations
+
 import sys
 from pathlib import Path
+from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -20,14 +23,46 @@ DEFAULT_LECTURE_HOTWORDS = (
 )
 
 
+def _safe_string(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _model_cache_markers(model_name: str) -> list[str]:
+    model = _safe_string(model_name).lower()
+    return [
+        model,
+        f"faster-whisper-{model}",
+        f"models--systran--faster-whisper-{model}",
+    ]
+
+
+def _cache_dir_has_requested_model(cache_dir: Path, model_name: str) -> bool:
+    if not cache_dir.exists() or not cache_dir.is_dir():
+        return False
+
+    markers = _model_cache_markers(model_name)
+
+    try:
+        for path in cache_dir.rglob("*"):
+            path_str = str(path).lower()
+            if any(marker in path_str for marker in markers):
+                return True
+    except Exception:
+        return False
+
+    return False
+
+
 def build_transcription_cmd(
     input_folder,
     output_dir,
     model="large-v3",
     device="cuda",
     compute_type="float16",
-    batch_size=8,
-    beam_size=5,
+    batch_size=6,           # RTX 4060 8GB laptop safe tuning
+    beam_size=5,            # unchanged
     vad=True,
     recursive=True,
     local_only=True,
@@ -36,15 +71,25 @@ def build_transcription_cmd(
     overwrite=False,
     chunk_length=20,
     vad_min_silence_ms=500,
-    cache_dir=r"D:\AI_MODELS\whisper\faster_whisper_cache",
-    decode_mode="single",
+    cache_dir=None,
+    decode_mode="batched",  # staged single-file flow + batch folders
     initial_prompt=DEFAULT_LECTURE_PROMPT,
     hotwords=DEFAULT_LECTURE_HOTWORDS,
 ):
+    input_path = Path(input_folder)
+    output_dir = Path(output_dir)
+
+    # If a caller directly passes a single file, use single mode.
+    # In the workflow, single jobs are staged into a temp folder,
+    # so they still use batched mode there.
+    effective_decode_mode = str(decode_mode)
+    if input_path.is_file():
+        effective_decode_mode = "single"
+
     cmd = [
         sys.executable,
         str(ENGINE_PATH),
-        str(input_folder),
+        str(input_path),
         "-o",
         str(output_dir),
         "--device",
@@ -61,11 +106,14 @@ def build_transcription_cmd(
         str(language),
         "--vad_min_silence_ms",
         str(vad_min_silence_ms),
-        "--cache_dir",
-        str(cache_dir),
         "--decode_mode",
-        str(decode_mode),
+        str(effective_decode_mode),
     ]
+
+    if cache_dir:
+        cache_path = Path(cache_dir)
+        if _cache_dir_has_requested_model(cache_path, model):
+            cmd.extend(["--cache_dir", str(cache_path)])
 
     if vad:
         cmd.append("--vad")
