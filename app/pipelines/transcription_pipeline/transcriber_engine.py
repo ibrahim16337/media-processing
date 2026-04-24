@@ -1,4 +1,5 @@
 import os
+import io
 import sys
 import time
 import argparse
@@ -13,8 +14,11 @@ from faster_whisper import WhisperModel, BatchedInferencePipeline
 # --------------------------------------------------
 
 try:
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    if isinstance(sys.stdout, io.TextIOWrapper):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+    if isinstance(sys.stderr, io.TextIOWrapper):
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 except Exception:
     pass
 
