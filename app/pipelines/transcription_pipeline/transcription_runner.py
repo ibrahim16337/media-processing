@@ -7,6 +7,12 @@ from typing import Any
 from app.config.paths import (
     TRANSCRIBER_ENGINE_PATH,
     WHISPER_CACHE_DIR,
+    TRANSCRIPTION_BATCH_SIZE,
+    TRANSCRIPTION_NUM_WORKERS,
+    TRANSCRIPTION_DEVICE,
+    TRANSCRIPTION_COMPUTE_TYPE,
+    TRANSCRIPTION_BEAM_SIZE,
+    TRANSCRIPTION_DECODE_MODE,
 )
 
 
@@ -37,6 +43,7 @@ def _model_cache_markers(model_name: str) -> list[str]:
         model,
         f"faster-whisper-{model}",
         f"models--systran--faster-whisper-{model}",
+        f"models--Systran--faster-whisper-{model}",
     ]
 
 
@@ -44,15 +51,25 @@ def _cache_dir_has_requested_model(cache_dir: Path, model_name: str) -> bool:
     if not cache_dir.exists() or not cache_dir.is_dir():
         return False
 
-    markers = _model_cache_markers(model_name)
+    model = _safe_string(model_name).lower()
 
-    try:
-        for path in cache_dir.rglob("*"):
-            path_str = str(path).lower()
-            if any(marker in path_str for marker in markers):
+    candidate_dirs = [
+        cache_dir / f"models--systran--faster-whisper-{model}",
+        cache_dir / f"models--Systran--faster-whisper-{model}",
+    ]
+
+    for model_dir in candidate_dirs:
+        snapshots_dir = model_dir / "snapshots"
+        if not snapshots_dir.exists():
+            continue
+
+        for snapshot in snapshots_dir.iterdir():
+            if not snapshot.is_dir():
+                continue
+
+            model_bin = snapshot / "model.bin"
+            if model_bin.exists() and model_bin.is_file():
                 return True
-    except Exception:
-        return False
 
     return False
 
@@ -61,10 +78,11 @@ def build_transcription_cmd(
     input_folder,
     output_dir,
     model="large-v3",
-    device="cuda",
-    compute_type="float16",
-    batch_size=6,
-    beam_size=5,
+    device=TRANSCRIPTION_DEVICE,
+    compute_type=TRANSCRIPTION_COMPUTE_TYPE,
+    batch_size=TRANSCRIPTION_BATCH_SIZE,
+    num_workers=TRANSCRIPTION_NUM_WORKERS,
+    beam_size=TRANSCRIPTION_BEAM_SIZE,
     vad=True,
     recursive=True,
     local_only=True,
@@ -74,7 +92,7 @@ def build_transcription_cmd(
     chunk_length=20,
     vad_min_silence_ms=500,
     cache_dir=WHISPER_CACHE_DIR,
-    decode_mode="batched",
+    decode_mode=TRANSCRIPTION_DECODE_MODE,
     initial_prompt=DEFAULT_LECTURE_PROMPT,
     hotwords=DEFAULT_LECTURE_HOTWORDS,
 ):
@@ -97,6 +115,8 @@ def build_transcription_cmd(
         str(model),
         "--compute_type",
         str(compute_type),
+        "--num_workers",
+        str(num_workers),
         "--batch_size",
         str(batch_size),
         "--beam_size",

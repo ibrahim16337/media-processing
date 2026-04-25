@@ -73,6 +73,17 @@ FFPROBE_EXE = FFMPEG_DIR / "ffprobe.exe"
 CUDA_BIN_DIR = Path(r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin")
 
 # ---------------------------------------------------
+# Transcription performance defaults
+# ---------------------------------------------------
+
+TRANSCRIPTION_BATCH_SIZE = 12
+TRANSCRIPTION_NUM_WORKERS = 6
+TRANSCRIPTION_DEVICE = "cuda"
+TRANSCRIPTION_COMPUTE_TYPE = "float16"
+TRANSCRIPTION_BEAM_SIZE = 5
+TRANSCRIPTION_DECODE_MODE = "batched"
+
+# ---------------------------------------------------
 # Internal important file paths
 # ---------------------------------------------------
 

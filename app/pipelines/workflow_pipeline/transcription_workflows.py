@@ -34,6 +34,36 @@ def _safe_string(value: Any) -> str:
     return str(value).strip()
 
 
+
+
+def _normalize_transcription_settings(
+    transcription_settings: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if not transcription_settings:
+        return {}
+
+    normalized: dict[str, Any] = {}
+
+    if "batch_size" in transcription_settings:
+        normalized["batch_size"] = int(transcription_settings["batch_size"])
+
+    if "num_workers" in transcription_settings:
+        normalized["num_workers"] = int(transcription_settings["num_workers"])
+
+    if "device" in transcription_settings:
+        normalized["device"] = str(transcription_settings["device"]).strip()
+
+    if "compute_type" in transcription_settings:
+        normalized["compute_type"] = str(transcription_settings["compute_type"]).strip()
+
+    if "beam_size" in transcription_settings:
+        normalized["beam_size"] = int(transcription_settings["beam_size"])
+
+    if "decode_mode" in transcription_settings:
+        normalized["decode_mode"] = str(transcription_settings["decode_mode"]).strip()
+
+    return normalized
+
 def _emit_progress(
     progress_callback: ProgressCallback,
     stage: str,
@@ -168,6 +198,7 @@ def _extract_error_message(transcription_result: dict[str, Any]) -> str:
 def _run_transcription_subprocess(
     input_path: Path,
     output_dir: Path,
+    transcription_settings: dict[str, Any] | None = None,
     progress_callback: ProgressCallback = None,
     stage_start_percent: float = 0.0,
     stage_end_percent: float = 100.0,
@@ -175,7 +206,8 @@ def _run_transcription_subprocess(
     progress_pattern = re.compile(r"(\d+\.\d+)%")
     output_lines: list[str] = []
 
-    cmd = build_transcription_cmd(input_path, output_dir)
+    runtime_settings = _normalize_transcription_settings(transcription_settings)
+    cmd = build_transcription_cmd(input_path, output_dir, **runtime_settings)
 
     env = os.environ.copy()
     env["PYTHONUTF8"] = "1"
@@ -281,6 +313,7 @@ def _stage_file_for_batched_decode(source_file: Path, staged_file: Path) -> None
 def _run_single_file_via_temp_batched_folder(
     input_wav: Path,
     output_dir: Path,
+    transcription_settings: dict[str, Any] | None = None,
     progress_callback: ProgressCallback = None,
     stage_start_percent: float = 0.0,
     stage_end_percent: float = 100.0,
@@ -298,6 +331,7 @@ def _run_single_file_via_temp_batched_folder(
         return _run_transcription_subprocess(
             input_path=temp_batch_dir,
             output_dir=output_dir,
+            transcription_settings=transcription_settings,
             progress_callback=progress_callback,
             stage_start_percent=stage_start_percent,
             stage_end_percent=stage_end_percent,
@@ -312,6 +346,7 @@ def transcribe_single_youtube(
     audio_output_dir: Path = UPLOAD_AUDIO_DIR,
     download_progress_callback: ProgressCallback = None,
     progress_callback: ProgressCallback = None,
+    transcription_settings: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     youtube_url = _safe_string(youtube_url)
     if not youtube_url:
@@ -405,6 +440,7 @@ def transcribe_single_youtube(
     transcription_result = _run_single_file_via_temp_batched_folder(
         input_wav=wav_file,
         output_dir=transcript_output_dir,
+        transcription_settings=transcription_settings,
         progress_callback=progress_callback,
         stage_start_percent=35,
         stage_end_percent=100,
@@ -431,7 +467,10 @@ def transcribe_single_youtube(
         except Exception:
             pass
 
-    final_ok = bool(resolved_transcript_file.exists())
+    final_ok = bool(
+        transcription_result.get("ok", False)
+        or (resolved_transcript_file.exists() and bool(transcript_text))
+    )
 
     return {
         "ok": final_ok,
@@ -457,6 +496,7 @@ def transcribe_single_media_file(
     transcript_output_dir: Path = TRANSCRIPT_DIR,
     audio_output_dir: Path = UPLOAD_AUDIO_DIR,
     progress_callback: ProgressCallback = None,
+    transcription_settings: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     media_path = Path(media_file)
     if not media_path.exists():
@@ -486,6 +526,7 @@ def transcribe_single_media_file(
     transcription_result = _run_single_file_via_temp_batched_folder(
         input_wav=wav_file,
         output_dir=transcript_output_dir,
+        transcription_settings=transcription_settings,
         progress_callback=progress_callback,
         stage_start_percent=20,
         stage_end_percent=100,
@@ -512,7 +553,10 @@ def transcribe_single_media_file(
         except Exception:
             pass
 
-    final_ok = bool(resolved_transcript_file.exists())
+    final_ok = bool(
+        transcription_result.get("ok", False)
+        or (resolved_transcript_file.exists() and bool(transcript_text))
+    )
 
     return {
         "ok": final_ok,
@@ -533,6 +577,7 @@ def transcribe_batch_media(
     video_input_dir: Path = UPLOAD_VIDEO_DIR,
     transcript_output_dir: Path = TRANSCRIPT_DIR,
     progress_callback: ProgressCallback = None,
+    transcription_settings: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     audio_input_dir.mkdir(parents=True, exist_ok=True)
     video_input_dir.mkdir(parents=True, exist_ok=True)
@@ -598,6 +643,7 @@ def transcribe_batch_media(
     transcription_result = _run_transcription_subprocess(
         input_path=audio_input_dir,
         output_dir=transcript_output_dir,
+        transcription_settings=transcription_settings,
         progress_callback=progress_callback,
         stage_start_percent=30,
         stage_end_percent=100,
@@ -633,6 +679,7 @@ def transcribe_playlist(
     download_progress_callback: ProgressCallback = None,
     generate_playlist_excel_file: bool = True,
     progress_callback: ProgressCallback = None,
+    transcription_settings: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     playlist_url = _safe_string(playlist_url)
     if not playlist_url:
@@ -699,6 +746,7 @@ def transcribe_playlist(
     transcription_result = _run_transcription_subprocess(
         input_path=paths.audio,
         output_dir=paths.transcripts,
+        transcription_settings=transcription_settings,
         progress_callback=progress_callback,
         stage_start_percent=65,
         stage_end_percent=95,

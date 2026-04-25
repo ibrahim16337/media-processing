@@ -22,6 +22,12 @@ from app.config.paths import (
     CUDA_BIN_DIR,
     TRANSCRIPT_DIR,
     WHISPER_CACHE_DIR,
+    TRANSCRIPTION_BATCH_SIZE,
+    TRANSCRIPTION_NUM_WORKERS,
+    TRANSCRIPTION_DEVICE,
+    TRANSCRIPTION_COMPUTE_TYPE,
+    TRANSCRIPTION_BEAM_SIZE,
+    TRANSCRIPTION_DECODE_MODE,
 )
 
 # --------------------------------------------------
@@ -97,10 +103,10 @@ def collect_audio_files(p: Path, recursive: bool):
 
 def live_iter_segments(segments_iter, total_duration, label):
     seg_count = 0
-    last_ui = 0
+    last_ui = 0.0
     t0 = time.time()
 
-    print(f"-> {safe_text(label)}")
+    print(f"-> {safe_text(label)}", flush=True)
 
     for seg in segments_iter:
         seg_count += 1
@@ -116,10 +122,10 @@ def live_iter_segments(segments_iter, total_duration, label):
 
                 elapsed = now - t0
 
+                # Newline-terminated progress for Streamlit subprocess readers
                 print(
-                    f"\r   {pct:6.2f}%  {format_hms(seg.end):>8}/{format_hms(total_duration):>8}  "
+                    f"PROGRESS {pct:6.2f}%  {format_hms(seg.end):>8}/{format_hms(total_duration):>8}  "
                     f"segs:{seg_count:<5}  elapsed:{format_hms(elapsed)}",
-                    end="",
                     flush=True,
                 )
 
@@ -129,10 +135,10 @@ def live_iter_segments(segments_iter, total_duration, label):
 
     if total_duration:
         elapsed = time.time() - t0
-
         print(
-            f"\r   100.00%  {format_hms(total_duration):>8}/{format_hms(total_duration):>8}  "
-            f"segs:{seg_count:<5}  elapsed:{format_hms(elapsed)}"
+            f"PROGRESS 100.00%  {format_hms(total_duration):>8}/{format_hms(total_duration):>8}  "
+            f"segs:{seg_count:<5}  elapsed:{format_hms(elapsed)}",
+            flush=True,
         )
 
 
@@ -189,7 +195,7 @@ def producer(files):
         if stop_event.is_set():
             break
 
-        print(f"[CPU] preparing {safe_text(f.name)}")
+        print(f"[CPU] preparing {safe_text(f.name)}", flush=True)
 
         while not stop_event.is_set():
             try:
@@ -230,12 +236,12 @@ def consumer(transcriber, out_dir, args, total_files):
         out_path = out_dir / f"{audio_file.stem}.txt"
 
         if out_path.exists() and not args.overwrite:
-            print(f"[{index}/{total_files}] ⏭️ {safe_text(audio_file.name)} exists")
+            print(f"[{index}/{total_files}] ⏭️ {safe_text(audio_file.name)} exists", flush=True)
             ok += 1
             index += 1
             continue
 
-        print(f"[{index}/{total_files}]")
+        print(f"[{index}/{total_files}]", flush=True)
 
         try:
             segments_iter, info = transcribe_audio(
@@ -252,10 +258,11 @@ def consumer(transcriber, out_dir, args, total_files):
                 if detected_probability is not None:
                     print(
                         f"Detected language: {detected_language} "
-                        f"(prob={detected_probability:.2f})"
+                        f"(prob={detected_probability:.2f})",
+                        flush=True,
                     )
                 else:
-                    print(f"Detected language: {detected_language}")
+                    print(f"Detected language: {detected_language}", flush=True)
 
             parts = []
 
@@ -288,7 +295,7 @@ def consumer(transcriber, out_dir, args, total_files):
 
             atomic_write_text(out_path, final_text)
 
-            print(f"✅ saved: {safe_text(out_path.name)}\n")
+            print(f"✅ saved: {safe_text(out_path.name)}", flush=True)
 
             ok += 1
             index += 1
@@ -301,18 +308,18 @@ def consumer(transcriber, out_dir, args, total_files):
                     "   --multilingual / --hotwords / --initial_prompt\n"
                     "Upgrade with: pip install -U faster-whisper"
                 )
-                print(error_message)
+                print(error_message, flush=True)
                 report_fatal_error(error_message)
                 return
             else:
                 error_message = f"❌ {safe_text(audio_file.name)}: {e}"
-                print(error_message)
+                print(error_message, flush=True)
                 report_fatal_error(error_message)
                 return
 
         except Exception as e:
             error_message = f"❌ {safe_text(audio_file.name)}: {e}"
-            print(error_message)
+            print(error_message, flush=True)
             report_fatal_error(error_message)
             return
 
@@ -323,10 +330,10 @@ def main():
     ap.add_argument("input")
     ap.add_argument("-o", "--output_dir", default=str(TRANSCRIPT_DIR))
     ap.add_argument("--model", default="large-v3")
-    ap.add_argument("--device", default="cuda")
-    ap.add_argument("--compute_type", default="float16")
+    ap.add_argument("--device", default=TRANSCRIPTION_DEVICE)
+    ap.add_argument("--compute_type", default=TRANSCRIPTION_COMPUTE_TYPE)
     ap.add_argument("--device_index", type=int, default=0)
-    ap.add_argument("--num_workers", type=int, default=4)
+    ap.add_argument("--num_workers", type=int, default=TRANSCRIPTION_NUM_WORKERS)
     ap.add_argument("--recursive", action="store_true")
     ap.add_argument("--overwrite", action="store_true")
 
@@ -345,12 +352,12 @@ def main():
     ap.add_argument(
         "--decode_mode",
         choices=["single", "batched"],
-        default="batched",
+        default=TRANSCRIPTION_DECODE_MODE,
         help="single = accuracy-first, batched = speed-first",
     )
 
-    ap.add_argument("--beam_size", type=int, default=5)
-    ap.add_argument("--batch_size", type=int, default=6)
+    ap.add_argument("--beam_size", type=int, default=TRANSCRIPTION_BEAM_SIZE)
+    ap.add_argument("--batch_size", type=int, default=TRANSCRIPTION_BATCH_SIZE)
     ap.add_argument("--chunk_length", type=int, default=None)
     ap.add_argument("--vad", action="store_true")
     ap.add_argument("--vad_min_silence_ms", type=int, default=500)
@@ -380,13 +387,13 @@ def main():
         try:
             import onnxruntime  # noqa: F401
         except Exception:
-            print("Install: pip install onnxruntime")
+            print("Install: pip install onnxruntime", flush=True)
             sys.exit(1)
 
     cache_dir = Path(args.cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
 
-    print("Loading Whisper model...")
+    print("Loading Whisper model...", flush=True)
 
     model = WhisperModel(
         args.model,
@@ -407,13 +414,17 @@ def main():
     files = collect_audio_files(inp, recursive=args.recursive)
 
     if not files:
-        print("No audio files found")
+        print("No audio files found", flush=True)
         sys.exit(1)
 
-    print(f"Found {len(files)} files")
-    print(f"Decode mode: {args.decode_mode}")
-    print(f"Language: {args.language}")
-    print(f"Multilingual: {args.multilingual}")
+    print(f"Found {len(files)} files", flush=True)
+    print(f"Decode mode: {args.decode_mode}", flush=True)
+    print(f"Language: {args.language}", flush=True)
+    print(f"Multilingual: {args.multilingual}", flush=True)
+    print(f"Batch size: {args.batch_size}", flush=True)
+    print(f"Num workers: {args.num_workers}", flush=True)
+    print(f"Device: {args.device}", flush=True)
+    print(f"Compute type: {args.compute_type}", flush=True)
 
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -434,11 +445,11 @@ def main():
 
     if not error_queue.empty():
         fatal_message = error_queue.get()
-        print(f"\nFATAL: {fatal_message}")
+        print(f"\nFATAL: {fatal_message}", flush=True)
         sys.exit(1)
 
     elapsed = time.time() - start
-    print(f"Done in {format_hms(elapsed)}")
+    print(f"Done in {format_hms(elapsed)}", flush=True)
 
 
 if __name__ == "__main__":
