@@ -643,7 +643,7 @@ with transcription_tab:
                         if result.get("ok", False):
                             st.success("Transcription completed successfully.")
                         else:
-                            st.error("Transcription failed.")
+                            st.error(result.get("error", "Transcription failed."))
                     except Exception as e:
                         st.error(f"Error: {e}")
 
@@ -802,7 +802,7 @@ with transcription_tab:
                     if result.get("ok", False):
                         st.success("Playlist transcription completed successfully.")
                     else:
-                        st.error("Playlist transcription failed.")
+                        st.error(result.get("error", "Playlist transcription failed."))
                 except Exception as e:
                     st.error(f"Error: {e}")
 
@@ -1001,6 +1001,14 @@ with transcription_tab:
 # ==================================================
 
 with metadata_tab:
+    st.markdown("### Runtime Transcription Settings")
+    st.caption(
+        "These settings are used only when Metadata / SEO first needs to transcribe media, "
+        "such as YouTube videos, uploaded audio/video files, or playlists. "
+        "They are ignored for existing transcript and Excel metadata workflows."
+    )
+    metadata_transcription_settings = render_transcription_settings_ui("metadata_runtime")
+
     m_single, m_batch, m_playlist, m_existing = st.tabs([
         "Single YouTube",
         "Batch Inputs",
@@ -1054,6 +1062,7 @@ with metadata_tab:
                         num_predict=int(single_num_predict),
                         seed=seed_value,
                         progress_callback=progress_callback,
+                        transcription_settings=metadata_transcription_settings,
                     )
 
                     st.session_state["metadata_single_result"] = result
@@ -1093,6 +1102,15 @@ with metadata_tab:
             horizontal=True,
             key="metadata_batch_mode",
         )
+
+        if batch_mode == "Media Files":
+            st.info(
+                "This mode will transcribe the uploaded media first, so it uses the Metadata / SEO transcription settings above."
+            )
+        else:
+            st.info(
+                "This mode uses existing transcript text directly, so transcription settings are ignored."
+            )
 
         with st.expander("LLM Settings", expanded=False):
             batch_llm_col1, batch_llm_col2 = st.columns(2)
@@ -1167,6 +1185,7 @@ with metadata_tab:
                             num_predict=int(batch_num_predict),
                             seed=seed_value,
                             progress_callback=progress_callback,
+                            transcription_settings=metadata_transcription_settings,
                         )
 
                         st.session_state["metadata_batch_result"] = result
@@ -1294,6 +1313,7 @@ with metadata_tab:
                         num_predict=int(playlist_num_predict),
                         seed=seed_value,
                         progress_callback=progress_callback,
+                        transcription_settings=metadata_transcription_settings,
                     )
 
                     st.session_state["metadata_playlist_result"] = result
@@ -1345,6 +1365,7 @@ with metadata_tab:
 
     with m_existing:
         st.subheader("Existing Transcripts / Excel → Metadata Only")
+        st.info("This workflow does not transcribe media. It sends existing transcript text directly to the LLM.")
 
         existing_mode = st.radio(
             "Input Type",
