@@ -56,6 +56,7 @@ def _emit_progress(
         }
     )
 
+
 def _safe_string(value: Any) -> str:
     if value is None:
         return ""
@@ -167,11 +168,23 @@ def generate_metadata_from_single_youtube(
     num_predict: int = DEFAULT_NUM_PREDICT,
     seed: int | None = None,
     progress_callback: ProgressCallback = None,
+    transcription_settings: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """
+    Generate metadata from a single YouTube URL.
+
+    Flow:
+    YouTube URL -> download/standardize/transcribe -> transcript -> LLM metadata.
+
+    transcription_settings is forwarded into the transcription workflow so the
+    Metadata / SEO tab can use the same dynamic runtime settings as the main
+    Transcription tab.
+    """
+
     def transcription_progress_bridge(event: dict[str, Any]) -> None:
         raw_percent = float(event.get("percent", 0))
         mapped_percent = (raw_percent / 100.0) * 60.0
-        
+
         _emit_progress(
             progress_callback,
             stage=event.get("stage", "transcription"),
@@ -181,11 +194,11 @@ def generate_metadata_from_single_youtube(
             total=event.get("total"),
         )
 
-    
     transcription_result = transcribe_single_youtube(
         youtube_url=youtube_url,
         download_progress_callback=download_progress_callback,
         progress_callback=transcription_progress_bridge,
+        transcription_settings=transcription_settings,
     )
 
     transcript_file = Path(transcription_result.get("transcript_file", ""))
@@ -196,7 +209,10 @@ def generate_metadata_from_single_youtube(
             "mode": "single_youtube_metadata",
             "transcription": transcription_result,
             "metadata": None,
-            "error": "Transcription failed or transcript file was not created.",
+            "error": transcription_result.get(
+                "error",
+                "Transcription failed or transcript file was not created.",
+            ),
         }
 
     def metadata_progress_bridge(event: dict[str, Any]) -> None:
@@ -211,8 +227,7 @@ def generate_metadata_from_single_youtube(
             current=event.get("current"),
             total=event.get("total"),
         )
-    
-    
+
     metadata_result = _run_metadata_only(
         source_type="single_file",
         source_path=transcript_file,
@@ -253,8 +268,34 @@ def generate_metadata_from_single_media_file(
     num_ctx: int = DEFAULT_NUM_CTX,
     num_predict: int = DEFAULT_NUM_PREDICT,
     seed: int | None = None,
+    progress_callback: ProgressCallback = None,
+    transcription_settings: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    transcription_result = transcribe_single_media_file(media_file=media_file)
+    """
+    Generate metadata from a single local audio/video file.
+
+    Flow:
+    media file -> standardize/transcribe -> transcript -> LLM metadata.
+    """
+
+    def transcription_progress_bridge(event: dict[str, Any]) -> None:
+        raw_percent = float(event.get("percent", 0))
+        mapped_percent = (raw_percent / 100.0) * 60.0
+
+        _emit_progress(
+            progress_callback,
+            stage=event.get("stage", "transcription"),
+            percent=mapped_percent,
+            message=_safe_string(event.get("message", "")),
+            current=event.get("current"),
+            total=event.get("total"),
+        )
+
+    transcription_result = transcribe_single_media_file(
+        media_file=media_file,
+        progress_callback=transcription_progress_bridge,
+        transcription_settings=transcription_settings,
+    )
 
     transcript_file = Path(transcription_result.get("transcript_file", ""))
 
@@ -264,8 +305,24 @@ def generate_metadata_from_single_media_file(
             "mode": "single_media_metadata",
             "transcription": transcription_result,
             "metadata": None,
-            "error": "Transcription failed or transcript file was not created.",
+            "error": transcription_result.get(
+                "error",
+                "Transcription failed or transcript file was not created.",
+            ),
         }
+
+    def metadata_progress_bridge(event: dict[str, Any]) -> None:
+        raw_percent = float(event.get("percent", 0))
+        mapped_percent = 60.0 + ((raw_percent / 100.0) * 40.0)
+
+        _emit_progress(
+            progress_callback,
+            stage=event.get("stage", "metadata"),
+            percent=mapped_percent,
+            message=_safe_string(event.get("message", "")),
+            current=event.get("current"),
+            total=event.get("total"),
+        )
 
     metadata_result = _run_metadata_only(
         source_type="single_file",
@@ -281,6 +338,7 @@ def generate_metadata_from_single_media_file(
         num_ctx=num_ctx,
         num_predict=num_predict,
         seed=seed,
+        progress_callback=metadata_progress_bridge,
     )
 
     return {
@@ -306,7 +364,15 @@ def generate_metadata_from_batch_media(
     num_predict: int = DEFAULT_NUM_PREDICT,
     seed: int | None = None,
     progress_callback: ProgressCallback = None,
+    transcription_settings: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """
+    Generate metadata from the current batch media input.
+
+    Flow:
+    batch media -> standardize/transcribe -> transcript folder -> LLM metadata.
+    """
+
     start_time = time.time()
 
     def transcription_progress_bridge(event: dict[str, Any]) -> None:
@@ -324,6 +390,7 @@ def generate_metadata_from_batch_media(
 
     transcription_result = transcribe_batch_media(
         progress_callback=transcription_progress_bridge,
+        transcription_settings=transcription_settings,
     )
 
     transcript_files = transcription_result.get("transcript_files", []) or []
@@ -338,14 +405,16 @@ def generate_metadata_from_batch_media(
             "mode": "batch_media_metadata",
             "transcription": transcription_result,
             "metadata": None,
-            "error": "No transcript files were found for metadata generation.",
+            "error": transcription_result.get(
+                "error",
+                "No transcript files were found for metadata generation.",
+            ),
         }
 
     workspace = _build_temp_workspace("batch_media_metadata", output_name or "batch_media")
     staged_transcripts_dir = workspace / "transcripts"
     staged_files = _copy_files_to_folder(recent_transcript_files, staged_transcripts_dir)
 
-    
     def metadata_progress_bridge(event: dict[str, Any]) -> None:
         raw_percent = float(event.get("percent", 0))
         mapped_percent = 55.0 + ((raw_percent / 100.0) * 45.0)
@@ -358,8 +427,7 @@ def generate_metadata_from_batch_media(
             current=event.get("current"),
             total=event.get("total"),
         )
-    
-    
+
     metadata_result = _run_metadata_only(
         source_type="folder",
         source_path=staged_transcripts_dir,
@@ -404,7 +472,15 @@ def generate_metadata_from_playlist(
     num_predict: int = DEFAULT_NUM_PREDICT,
     seed: int | None = None,
     progress_callback: ProgressCallback = None,
+    transcription_settings: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """
+    Generate metadata from a YouTube playlist.
+
+    Flow:
+    playlist -> download/standardize/transcribe -> transcript folder -> LLM metadata.
+    """
+
     def transcription_progress_bridge(event: dict[str, Any]) -> None:
         raw_percent = float(event.get("percent", 0))
         mapped_percent = (raw_percent / 100.0) * 60.0
@@ -417,14 +493,15 @@ def generate_metadata_from_playlist(
             current=event.get("current"),
             total=event.get("total"),
         )
-        
+
     transcription_result = transcribe_playlist(
-    playlist_url=playlist_url,
-    quality=quality,
-    download_progress_callback=download_progress_callback,
-    generate_playlist_excel_file=True,
-    progress_callback=transcription_progress_bridge,
-)
+        playlist_url=playlist_url,
+        quality=quality,
+        download_progress_callback=download_progress_callback,
+        generate_playlist_excel_file=True,
+        progress_callback=transcription_progress_bridge,
+        transcription_settings=transcription_settings,
+    )
 
     transcripts_dir = Path(transcription_result.get("transcripts_dir", ""))
 
@@ -434,12 +511,14 @@ def generate_metadata_from_playlist(
             "mode": "playlist_metadata",
             "transcription": transcription_result,
             "metadata": None,
-            "error": "Playlist transcription failed or transcript folder was not created.",
+            "error": transcription_result.get(
+                "error",
+                "Playlist transcription failed or transcript folder was not created.",
+            ),
         }
 
     playlist_root = Path(transcription_result.get("playlist_root", "")).name or "playlist"
 
-    
     def metadata_progress_bridge(event: dict[str, Any]) -> None:
         raw_percent = float(event.get("percent", 0))
         mapped_percent = 60.0 + ((raw_percent / 100.0) * 40.0)
@@ -452,8 +531,7 @@ def generate_metadata_from_playlist(
             current=event.get("current"),
             total=event.get("total"),
         )
-    
-    
+
     metadata_result = _run_metadata_only(
         source_type="folder",
         source_path=transcripts_dir,
