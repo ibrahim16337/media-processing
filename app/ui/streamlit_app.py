@@ -1767,4 +1767,4 @@ with server_upload_tab:
             help="Upload functionality will be added in the next step. This step only builds the browser UI.",
         )
 
-        st.info("Next step: add local file rename + actual upload to the selected remote folder.")
+        st.info("Next step: add local file rename + actual upload to the selected remote folder.") 
