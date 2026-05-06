@@ -70,6 +70,7 @@ from app.pipelines.workflow_pipeline.server_upload_workflows import (
     browse_remote_directory,
     browse_remote_parent,
     browse_remote_child,
+    upload_streamlit_video_files,
 )
 
 # --------------------------------------------------
@@ -102,6 +103,7 @@ st.session_state.setdefault("metadata_existing_result", None)
 st.session_state.setdefault("server_browser_snapshot", None)
 st.session_state.setdefault("server_browser_error", "")
 st.session_state.setdefault("server_selected_remote_path", "")
+st.session_state.setdefault("server_upload_result", None)
 
 # --------------------------------------------------
 # Constants
@@ -586,6 +588,70 @@ def load_server_browser_snapshot(remote_path: str | None = None):
         st.session_state["server_browser_snapshot"] = None
         st.session_state["server_browser_error"] = str(e)
         return None
+
+
+def format_size_bytes(num_bytes: int | float | None) -> str:
+    try:
+        size = float(num_bytes or 0)
+    except Exception:
+        return "0 B"
+
+    units = ["B", "KB", "MB", "GB", "TB"]
+    for unit in units:
+        if size < 1024 or unit == units[-1]:
+            return f"{size:.1f} {unit}" if unit != "B" else f"{int(size)} B"
+        size /= 1024
+    return f"{size:.1f} TB"
+
+
+def clean_upload_filename(filename: str, fallback_name: str) -> str:
+    """Return a safe single filename for remote upload, not a path."""
+    fallback_name = Path(fallback_name).name
+    value = _safe_string(filename) or fallback_name
+    value = value.replace("/", "_").replace("\\", "_")
+    value = Path(value).name.strip()
+
+    if not value:
+        value = fallback_name
+
+    if not Path(value).suffix and Path(fallback_name).suffix:
+        value = f"{value}{Path(fallback_name).suffix}"
+
+    return value
+
+
+def render_server_upload_result(upload_result: dict | None):
+    if not upload_result:
+        return
+
+    st.markdown("### Upload Result")
+
+    metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
+    with metric_col1:
+        st.metric("Total", upload_result.get("total_files", 0))
+    with metric_col2:
+        st.metric("Uploaded", upload_result.get("uploaded_count", 0))
+    with metric_col3:
+        st.metric("Skipped", upload_result.get("skipped_count", 0))
+    with metric_col4:
+        st.metric("Failed", upload_result.get("failed_count", 0))
+
+    rows = []
+    for item in upload_result.get("results", []) or []:
+        rows.append(
+            {
+                "original_name": item.get("original_name", ""),
+                "uploaded_name": item.get("uploaded_name", ""),
+                "status": item.get("status", ""),
+                "reason": item.get("reason", ""),
+                "remote_path": item.get("remote_path", ""),
+                "public_url": item.get("public_url", ""),
+            }
+        )
+
+    if rows:
+        st.dataframe(rows, use_container_width=True)
+
 
 
 # --------------------------------------------------
@@ -1616,6 +1682,7 @@ with metadata_tab:
 
 with server_upload_tab:
     st.subheader("Server Upload")
+    st.caption("Browse the remote server, choose the destination folder, optionally rename local videos, and upload one or multiple files in one action.")
 
     config_col1, config_col2, config_col3 = st.columns(3)
 
@@ -1664,107 +1731,173 @@ with server_upload_tab:
         snapshot = load_server_browser_snapshot()
 
     if snapshot:
+        current_remote_path = snapshot.get("current_path", "/")
+
         st.markdown("### Current Remote Location")
-        st.write(f"**Current Path:** `{snapshot.get('current_path', '/')}`")
+        st.write(f"**Current Path:** `{current_remote_path}`")
 
         breadcrumbs = snapshot.get("breadcrumbs", [])
         if breadcrumbs:
-            breadcrumb_labels = "  /  ".join(
-                [f"`{crumb['name']}`" for crumb in breadcrumbs]
-            )
+            breadcrumb_labels = "  /  ".join([f"`{crumb['name']}`" for crumb in breadcrumbs])
             st.markdown(f"**Breadcrumbs:** {breadcrumb_labels}")
 
         stats_col1, stats_col2, stats_col3 = st.columns(3)
-
         with stats_col1:
             st.metric("Folders", snapshot.get("folder_count", 0))
-
         with stats_col2:
             st.metric("Files", snapshot.get("file_count", 0))
-
         with stats_col3:
             st.metric("Videos", snapshot.get("video_count", 0))
 
-        nav_col1, nav_col2 = st.columns(2)
+        nav_col1, nav_col2, nav_col3 = st.columns(3)
 
         with nav_col1:
             parent_path = snapshot.get("parent_path")
             if parent_path:
                 if st.button("Go To Parent Folder", key="server_upload_go_parent"):
-                    parent_snapshot = browse_remote_parent(snapshot.get("current_path", "/"))
+                    parent_snapshot = browse_remote_parent(current_remote_path)
                     st.session_state["server_browser_snapshot"] = parent_snapshot
                     st.session_state["server_browser_error"] = ""
                     st.session_state["server_selected_remote_path"] = parent_snapshot.get("current_path", "")
                     st.rerun()
 
         with nav_col2:
-            if st.button("Reload This Folder", key="server_upload_reload_folder"):
-                refreshed_snapshot = browse_remote_directory(snapshot.get("current_path", "/"))
-                st.session_state["server_browser_snapshot"] = refreshed_snapshot
+            folders = snapshot.get("folders", [])
+            if folders:
+                folder_names = [str(folder["name"]) for folder in folders]
+                selected_folder_name = st.selectbox(
+                    "Open Subfolder",
+                    options=folder_names,
+                    key="server_upload_folder_selectbox",
+                )
+            else:
+                selected_folder_name = ""
+                st.caption("No subfolders found in this location.")
+
+        with nav_col3:
+            if st.button("Open Selected Folder", key="server_upload_open_folder", disabled=not bool(selected_folder_name)):
+                child_snapshot = browse_remote_child(current_remote_path, str(selected_folder_name))
+                st.session_state["server_browser_snapshot"] = child_snapshot
                 st.session_state["server_browser_error"] = ""
-                st.session_state["server_selected_remote_path"] = refreshed_snapshot.get("current_path", "")
+                st.session_state["server_selected_remote_path"] = child_snapshot.get("current_path", "")
                 st.rerun()
 
-        st.markdown("### Remote Folders")
-
-        folders = snapshot.get("folders", [])
-
-        if folders:
-            folder_names = [str(folder["name"]) for folder in folders]
-
-            selected_folder_name = st.selectbox(
-                "Select Folder To Open",
-                options=folder_names,
-                key="server_upload_folder_selectbox",
-            )
-
-            if st.button("Open Selected Folder", key="server_upload_open_folder"):
-                if selected_folder_name:
-                    child_snapshot = browse_remote_child(
-                        snapshot.get("current_path", "/"),
-                        str(selected_folder_name),
-                    )
-                    st.session_state["server_browser_snapshot"] = child_snapshot
-                    st.session_state["server_browser_error"] = ""
-                    st.session_state["server_selected_remote_path"] = child_snapshot.get("current_path", "")
-                    st.rerun()
-        else:
-            st.info("No subfolders found in this directory.")
-
-        st.markdown("### Files In Selected Remote Folder")
-
         remote_files = snapshot.get("files", [])
-        if remote_files:
-            file_rows = []
-            for file in remote_files:
-                file_rows.append(
-                    {
+        with st.expander("Files In Current Remote Folder", expanded=False):
+            if remote_files:
+                file_rows = []
+                for file in remote_files:
+                    file_rows.append({
                         "filename": file.get("name", ""),
                         "type": "Video" if file.get("is_video", False) else "File",
-                        "size_bytes": file.get("size_bytes", 0),
+                        "size": format_size_bytes(file.get("size_bytes", 0)),
                         "modified": file.get("modified", ""),
                         "remote_path": file.get("path", ""),
-                    }
-                )
+                    })
+                st.dataframe(file_rows, use_container_width=True, hide_index=True)
+            else:
+                st.info("No files found in this folder.")
 
-            st.dataframe(file_rows, use_container_width=True)
-        else:
-            st.info("No files found in this folder.")
+        st.markdown("---")
+        st.markdown("### Upload Videos")
 
-        st.markdown("### Upload Target")
+        upload_summary_col1, upload_summary_col2 = st.columns([2, 1])
+        with upload_summary_col1:
+            st.success(f"Selected upload folder: `{current_remote_path}`")
+            st.caption("Tip: you can select multiple local video files, rename each one individually, and upload them together.")
+        with upload_summary_col2:
+            st.metric("Files already in this folder", len(remote_files))
 
-        st.success(
-            f"Selected upload folder: {snapshot.get('current_path', '/')}"
-        )
-
-        st.markdown("### Local Video Selection")
-
-        st.file_uploader(
-            "Browse your PC and select one or multiple video files",
+        uploaded_server_video_files = st.file_uploader(
+            "Select one or multiple local video files",
             accept_multiple_files=True,
-            type=["mp4", "mkv", "mov", "avi", "webm"],
-            key="server_upload_video_picker_preview_only",
-            help="Upload functionality will be added in the next step. This step only builds the browser UI.",
+            type=["mp4", "mkv", "mov", "avi", "webm", "mpeg"],
+            key="server_upload_video_picker",
+            help="Choose one or more videos from your PC. You can rename each file before uploading.",
         )
 
-        st.info("Next step: add local file rename + actual upload to the selected remote folder.") 
+        if uploaded_server_video_files:
+            selected_rows = []
+            for uploaded_file in uploaded_server_video_files:
+                selected_rows.append({
+                    "original_name": Path(uploaded_file.name).name,
+                    "size": format_size_bytes(getattr(uploaded_file, "size", 0)),
+                    "extension": Path(uploaded_file.name).suffix.lower(),
+                })
+
+            selected_col1, selected_col2 = st.columns([1, 1])
+            with selected_col1:
+                st.metric("Selected videos", len(uploaded_server_video_files))
+            with selected_col2:
+                total_size = sum(int(getattr(f, "size", 0) or 0) for f in uploaded_server_video_files)
+                st.metric("Total selected size", format_size_bytes(total_size))
+
+            with st.expander("Selected Files", expanded=False):
+                st.dataframe(selected_rows, use_container_width=True, hide_index=True)
+
+            st.markdown("#### Rename Before Upload")
+            st.caption("Optional: change the final remote filename for each selected video. If you remove the extension, the original extension will be added automatically.")
+
+            rename_map: dict[str, str] = {}
+            for index, uploaded_file in enumerate(uploaded_server_video_files, start=1):
+                original_name = Path(uploaded_file.name).name
+                row_col1, row_col2 = st.columns([1.6, 2.4])
+
+                with row_col1:
+                    st.markdown(f"**{index}. {original_name}**")
+                    st.caption(f"Size: {format_size_bytes(getattr(uploaded_file, 'size', 0))}")
+
+                with row_col2:
+                    new_name = st.text_input(
+                        f"Upload name for file {index}",
+                        value=original_name,
+                        key=f"server_upload_rename_{index}_{original_name}",
+                    )
+                    rename_map[original_name] = clean_upload_filename(new_name, original_name)
+
+            action_col1, action_col2 = st.columns([1, 2])
+            with action_col1:
+                overwrite_existing = st.checkbox(
+                    "Overwrite existing files",
+                    value=False,
+                    key="server_upload_overwrite_existing",
+                )
+            with action_col2:
+                st.info(f"Ready to upload {len(uploaded_server_video_files)} file(s) to: `{current_remote_path}`")
+
+            if st.button("Start Upload", key="server_upload_start_button", type="primary", use_container_width=True):
+                try:
+                    progress_callback = create_progress_reporter("server_upload")
+
+                    upload_result = upload_streamlit_video_files(
+                        uploaded_files=uploaded_server_video_files,
+                        remote_dir=current_remote_path,
+                        rename_map=rename_map,
+                        overwrite=overwrite_existing,
+                        progress_callback=progress_callback,
+                    )
+
+                    st.session_state["server_upload_result"] = upload_result
+
+                    refreshed_snapshot = browse_remote_directory(current_remote_path)
+                    st.session_state["server_browser_snapshot"] = refreshed_snapshot
+                    st.session_state["server_browser_error"] = ""
+                    st.session_state["server_selected_remote_path"] = refreshed_snapshot.get("current_path", current_remote_path)
+
+                    if upload_result.get("ok", False):
+                        st.success(
+                            f"Upload completed: {upload_result.get('uploaded_count', 0)} uploaded, "
+                            f"{upload_result.get('skipped_count', 0)} skipped, "
+                            f"{upload_result.get('failed_count', 0)} failed."
+                        )
+                    else:
+                        st.warning(
+                            f"Upload finished with issues: {upload_result.get('uploaded_count', 0)} uploaded, "
+                            f"{upload_result.get('skipped_count', 0)} skipped, "
+                            f"{upload_result.get('failed_count', 0)} failed."
+                        )
+
+                except Exception as e:
+                    st.error(f"Upload failed: {e}")
+
+        render_server_upload_result(st.session_state.get("server_upload_result"))
