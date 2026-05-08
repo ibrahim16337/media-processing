@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Sequence, Callable
+from typing import Any, Callable, Sequence
 
 from openpyxl import load_workbook
 
@@ -52,8 +52,6 @@ from app.pipelines.workflow_pipeline.transcript_export_workflows import (
 
 
 SUPPORTED_SOURCE_TYPES = {"single_file", "folder", "excel"}
-
-
 ProgressCallback = Callable[[dict[str, Any]], None] | None
 
 
@@ -102,7 +100,6 @@ def _clean_transcript_text(text: str) -> str:
                 continue
             if stripped.startswith("Detected Language:"):
                 continue
-
             header_phase = False
 
         cleaned_lines.append(line)
@@ -121,7 +118,11 @@ def _write_text(path: Path, text: str) -> None:
 
 def _append_tsv_row(path: Path, values: list[Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    line = "\t".join(_safe_string(v).replace("\t", " ").replace("\n", " ") for v in values) + "\n"
+    line = "\t".join(
+        _safe_string(v).replace("\t", " ").replace("\n", " ")
+        for v in values
+    ) + "\n"
+
     with path.open("a", encoding="utf-8") as f:
         f.write(line)
 
@@ -142,8 +143,10 @@ def _resolve_base_output_dir(source_type: str, source_path: str | Path) -> Path:
 
     if source_type == "single_file":
         return METADATA_SINGLE_DIR
+
     if source_type == "folder":
         return METADATA_BATCH_DIR
+
     if source_type == "excel":
         return METADATA_EXCEL_IMPORT_DIR
 
@@ -191,8 +194,10 @@ def _build_run_dir(
     source_path_obj = Path(source_path)
     default_name = source_path_obj.stem if source_path_obj.is_file() else source_path_obj.name
     run_name = slugify(output_name or default_name or source_type)
+
     run_dir = base_dir / f"{_timestamp_str()}_{run_name}"
     run_dir.mkdir(parents=True, exist_ok=True)
+
     return run_dir
 
 
@@ -201,6 +206,7 @@ def _resolve_media_lookup_dirs_for_transcript_source(
     source_path: str | Path,
 ) -> list[Path]:
     source_path_obj = Path(source_path)
+
     lookup_dirs: list[Path] = []
 
     if source_type == "single_file":
@@ -246,7 +252,10 @@ def _build_transcript_enrichment_by_filename(
     else:
         return {}
 
-    media_lookup_dirs = _resolve_media_lookup_dirs_for_transcript_source(source_type, source_path)
+    media_lookup_dirs = _resolve_media_lookup_dirs_for_transcript_source(
+        source_type,
+        source_path,
+    )
 
     rows = build_transcript_rows(
         transcript_files=transcript_files,
@@ -302,6 +311,7 @@ def _build_excel_enrichment_by_row_number(
             return {}
 
         headers = [_safe_string(cell) for cell in header_row]
+
         transcript_idx = _find_header_index(headers, transcript_column)
         time_idx = _find_header_index(headers, "time")
         frame_size_idx = _find_header_index(headers, "frame_size")
@@ -343,12 +353,15 @@ def _build_enriched_metadata_row(
 ) -> dict[str, str]:
     filename = _safe_string(item.get("filename", ""))
     transcript_text = _clean_transcript_text(_safe_string(item.get("transcript", "")))
+
     video_length = ""
     video_type = ""
 
     if transcript_enrichment_by_filename:
         enrichment = transcript_enrichment_by_filename.get(filename, {})
-        transcript_text = _clean_transcript_text(_safe_string(enrichment.get("transcription", transcript_text)))
+        transcript_text = _clean_transcript_text(
+            _safe_string(enrichment.get("transcription", transcript_text))
+        )
         video_length = _safe_string(enrichment.get("audio length", ""))
         video_type = _safe_string(enrichment.get("video type", ""))
 
@@ -356,7 +369,9 @@ def _build_enriched_metadata_row(
         row_number = item.get("row_number")
         if isinstance(row_number, int):
             enrichment = excel_enrichment_by_row_number.get(row_number, {})
-            transcript_text = _clean_transcript_text(_safe_string(enrichment.get("transcript", transcript_text)))
+            transcript_text = _clean_transcript_text(
+                _safe_string(enrichment.get("transcript", transcript_text))
+            )
             video_length = _safe_string(enrichment.get("video_length", video_length))
             video_type = _safe_string(enrichment.get("video_type", video_type))
 
@@ -391,6 +406,8 @@ def run_metadata_generation(
     num_predict: int = DEFAULT_NUM_PREDICT,
     seed: int | None = None,
     system_message: str = "ہمیشہ ان پٹ کی زبان کا احترام کریں اور اگر ان پٹ اردو میں ہو تو اردو میں واضح، درست اور باوقار انداز میں جواب دیں۔",
+    prompt_template: str | None = None,
+    prompt_settings: dict[str, Any] | None = None,
     progress_callback: ProgressCallback = None,
 ) -> dict[str, Any]:
     source_type = _safe_string(source_type)
@@ -400,6 +417,8 @@ def run_metadata_generation(
             f"Unsupported source_type: {source_type}. "
             f"Expected one of: {', '.join(sorted(SUPPORTED_SOURCE_TYPES))}"
         )
+
+    prompt_settings = prompt_settings or {}
 
     items = _load_source_items(
         source_type=source_type,
@@ -417,7 +436,9 @@ def run_metadata_generation(
     )
 
     raw_dir = run_dir / "raw_responses"
+    prompt_dir = run_dir / "prompts_used"
     raw_dir.mkdir(parents=True, exist_ok=True)
+    prompt_dir.mkdir(parents=True, exist_ok=True)
 
     ok_log = run_dir / "llm_ok.tsv"
     err_log = run_dir / "llm_err.tsv"
@@ -467,7 +488,7 @@ def run_metadata_generation(
         }
 
     total_items = len(items)
-    
+
     _emit_progress(
         progress_callback,
         stage="metadata",
@@ -480,7 +501,7 @@ def run_metadata_generation(
     for index, item in enumerate(items, start=1):
         filename = _safe_string(item.get("filename", f"item_{index:03d}"))
         transcript_text = _clean_transcript_text(_safe_string(item.get("transcript", "")))
-        
+
         base_percent = ((index - 1) / total_items) * 100 if total_items else 0
 
         _emit_progress(
@@ -490,9 +511,16 @@ def run_metadata_generation(
             message=f"Generating metadata for item {index} of {total_items}: {filename}",
             current=index,
             total=total_items,
-        )       
+        )
 
-        prompt = build_metadata_prompt(transcript_text)
+        prompt = build_metadata_prompt(
+            transcript_text,
+            creative_prompt=prompt_template,
+            prompt_settings=prompt_settings,
+        )
+
+        prompt_file = prompt_dir / f"{index:03d}_{slugify(Path(filename).stem or filename)}_prompt.txt"
+        _write_text(prompt_file, prompt)
 
         llm_result = generate_metadata_from_prompt(
             user_prompt=prompt,
@@ -514,6 +542,7 @@ def run_metadata_generation(
 
         if not llm_result.get("ok", False):
             error_message = _safe_string(llm_result.get("error", "Unknown Ollama error"))
+
             _append_tsv_row(err_log, ["HTTPERR", index, filename, error_message])
 
             rows.append(
@@ -536,12 +565,14 @@ def run_metadata_generation(
                     "filename": filename,
                     "stage": "ollama_call",
                     "error": error_message,
+                    "prompt_file": str(prompt_file),
                     "raw_response_file": str(raw_response_file),
                 }
             )
 
             if sleep_ms > 0 and index < total_items:
                 time.sleep(sleep_ms / 1000.0)
+
             continue
 
         parsed = parse_metadata_json(raw_response_text)
@@ -569,6 +600,7 @@ def run_metadata_generation(
             )
         else:
             parse_error = _safe_string(parsed.get("error", "Invalid metadata JSON"))
+
             _append_tsv_row(err_log, ["PARSEERR", index, filename, parse_error])
 
             errors.append(
@@ -577,10 +609,11 @@ def run_metadata_generation(
                     "filename": filename,
                     "stage": "response_parse",
                     "error": parse_error,
+                    "prompt_file": str(prompt_file),
                     "raw_response_file": str(raw_response_file),
                 }
             )
-            
+
         done_percent = (index / total_items) * 100 if total_items else 100
 
         _emit_progress(
@@ -590,11 +623,10 @@ def run_metadata_generation(
             message=f"Completed item {index} of {total_items}: {filename}",
             current=index,
             total=total_items,
-        )    
+        )
 
         if sleep_ms > 0 and index < total_items:
             time.sleep(sleep_ms / 1000.0)
-
 
     _emit_progress(
         progress_callback,
@@ -604,10 +636,10 @@ def run_metadata_generation(
         current=total_items,
         total=total_items,
     )
-    
+
     export_metadata_excel(rows=rows, output_file=excel_output)
     export_metadata_json(rows=rows, output_file=json_output)
-    
+
     _emit_progress(
         progress_callback,
         stage="export",
@@ -627,6 +659,7 @@ def run_metadata_generation(
         "ok_log": str(ok_log),
         "err_log": str(err_log),
         "raw_dir": str(raw_dir),
+        "prompt_dir": str(prompt_dir),
         "total_items": total_items,
         "success_count": total_items - len(errors),
         "error_count": len(errors),
@@ -642,5 +675,7 @@ def run_metadata_generation(
             "num_ctx": num_ctx,
             "num_predict": num_predict,
             "seed": seed,
+            "prompt_mode": prompt_settings.get("mode", ""),
+            "prompt_preset": prompt_settings.get("preset_name", ""),
         },
     }
