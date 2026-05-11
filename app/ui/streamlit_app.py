@@ -599,6 +599,19 @@ def load_server_browser_snapshot(remote_path: str | None = None):
 
 
 def render_metadata_prompt_builder_ui(prefix: str = "metadata_prompt") -> dict[str, object]:
+    """
+    Render the hybrid dynamic prompt builder and return prompt settings.
+
+    This version avoids possibly-unbound variables by keeping the active prompt
+    values inside one prompt_config dictionary.
+    """
+    prompt_config: dict[str, object] = {
+        "mode": "advanced",
+        "preset_name": "Default SEO Metadata",
+        "creative_prompt": "",
+        "simple_settings": {},
+    }
+
     presets = {name: get_prompt_preset(name) for name in get_prompt_preset_names()}
     preset_names = list(presets.keys()) or ["Default SEO Metadata"]
 
@@ -618,14 +631,16 @@ def render_metadata_prompt_builder_ui(prefix: str = "metadata_prompt") -> dict[s
             )
 
         selected_preset = get_prompt_preset(selected_preset_name)
-        selected_mode = str(selected_preset.get("mode", "advanced")).lower()
+        selected_mode = str(selected_preset.get("mode", "advanced") or "advanced").lower()
         default_mode_index = 0 if selected_mode == "simple" else 1
 
         advanced_text_key = f"{prefix}_advanced_prompt_text"
         loaded_preset_key = f"{prefix}_loaded_preset"
 
         if st.session_state.get(loaded_preset_key) != selected_preset_name:
-            st.session_state[advanced_text_key] = str(selected_preset.get("creative_prompt", "") or "")
+            st.session_state[advanced_text_key] = str(
+                selected_preset.get("creative_prompt", "") or ""
+            )
             st.session_state[loaded_preset_key] = selected_preset_name
 
         with mode_col:
@@ -641,37 +656,56 @@ def render_metadata_prompt_builder_ui(prefix: str = "metadata_prompt") -> dict[s
         if preset_description:
             st.info(preset_description)
 
-        preset_simple_settings = selected_preset.get("simple_settings", {}) or {}
-
-        simple_settings: dict[str, object] = {
-            "video_type": "",
-            "platform": "",
-            "language": "",
-            "tone": "",
-            "title_style": "",
-            "description_style": "",
-            "tag_count": 20,
-            "hashtag_count": "3-5",
-            "extra_instructions": "",
-        }
+        preset_simple_settings_raw = selected_preset.get("simple_settings", {}) or {}
+        preset_simple_settings: dict[str, Any] = (
+            dict(preset_simple_settings_raw)
+            if isinstance(preset_simple_settings_raw, dict)
+            else {}
+        )
 
         if mode_choice == "Simple Builder":
             st.markdown("#### Simple Prompt Builder")
+
+            simple_settings: dict[str, Any] = {
+                "video_type": "",
+                "platform": "",
+                "language": "",
+                "tone": "",
+                "title_style": "",
+                "description_style": "",
+                "tag_count": 20,
+                "hashtag_count": "3-5",
+                "extra_instructions": "",
+            }
 
             s_col1, s_col2 = st.columns(2)
 
             with s_col1:
                 simple_settings["video_type"] = st.text_input(
                     "Video Type",
-                    value=str(preset_simple_settings.get("video_type", "Islamic educational content")),
+                    value=str(
+                        preset_simple_settings.get(
+                            "video_type",
+                            "Islamic educational content",
+                        )
+                    ),
                     key=f"{prefix}_video_type",
                 )
+
                 simple_settings["platform"] = st.selectbox(
                     "Platform",
-                    options=["YouTube", "YouTube Shorts / Instagram Reels / Facebook Reels", "Facebook", "Instagram", "Website Archive", "Custom"],
+                    options=[
+                        "YouTube",
+                        "YouTube Shorts / Instagram Reels / Facebook Reels",
+                        "Facebook",
+                        "Instagram",
+                        "Website Archive",
+                        "Custom",
+                    ],
                     index=0,
                     key=f"{prefix}_platform",
                 )
+
                 simple_settings["language"] = st.selectbox(
                     "Language Style",
                     options=[
@@ -683,31 +717,52 @@ def render_metadata_prompt_builder_ui(prefix: str = "metadata_prompt") -> dict[s
                     index=0,
                     key=f"{prefix}_language",
                 )
+
                 simple_settings["tone"] = st.text_input(
                     "Tone",
-                    value=str(preset_simple_settings.get("tone", "Respectful, informative, and SEO-focused")),
+                    value=str(
+                        preset_simple_settings.get(
+                            "tone",
+                            "Respectful, informative, and SEO-focused",
+                        )
+                    ),
                     key=f"{prefix}_tone",
                 )
 
             with s_col2:
                 simple_settings["title_style"] = st.text_input(
                     "Title Style",
-                    value=str(preset_simple_settings.get("title_style", "Topic-first Roman Urdu")),
+                    value=str(
+                        preset_simple_settings.get(
+                            "title_style",
+                            "Topic-first Roman Urdu",
+                        )
+                    ),
                     key=f"{prefix}_title_style",
                 )
+
                 simple_settings["description_style"] = st.text_input(
                     "Description Style",
-                    value=str(preset_simple_settings.get("description_style", "Clear English description")),
+                    value=str(
+                        preset_simple_settings.get(
+                            "description_style",
+                            "Clear English description",
+                        )
+                    ),
                     key=f"{prefix}_description_style",
                 )
-                simple_settings["tag_count"] = int(st.number_input(
-                    "Tag Count",
-                    min_value=5,
-                    max_value=50,
-                    value=int(preset_simple_settings.get("tag_count", 20) or 20),
-                    step=1,
-                    key=f"{prefix}_tag_count",
-                ))
+
+                simple_settings["tag_count"] = int(
+                    st.number_input(
+                        "Tag Count",
+                        min_value=5,
+                        max_value=50,
+                        value=int(preset_simple_settings.get("tag_count", 20) or 20),
+                        step=1,
+                        key=f"{prefix}_tag_count",
+                    )
+                )
+
                 simple_settings["hashtag_count"] = st.text_input(
                     "Hashtag Count",
                     value=str(preset_simple_settings.get("hashtag_count", "3-5")),
@@ -732,24 +787,45 @@ def render_metadata_prompt_builder_ui(prefix: str = "metadata_prompt") -> dict[s
                     disabled=True,
                 )
 
-            creative_prompt = ""
-            mode = "simple"
+            prompt_config = {
+                "mode": "simple",
+                "preset_name": selected_preset_name,
+                "creative_prompt": "",
+                "simple_settings": simple_settings,
+            }
 
         else:
             st.markdown("#### Advanced Prompt")
-            st.caption("Use [text], {transcript}, or {{transcript}} if you want to place the transcript manually. If not used, the transcript will be appended automatically.")
+            st.caption(
+                "Use [text], {transcript}, or {{transcript}} if you want to place the transcript manually. "
+                "If not used, the transcript will be appended automatically."
+            )
 
-            creative_prompt = st.text_area(
+            advanced_prompt_text = st.text_area(
                 "Editable Prompt",
                 value=st.session_state.get(advanced_text_key, ""),
                 height=360,
                 key=advanced_text_key,
             )
 
-            simple_settings = preset_simple_settings
-            mode = "advanced"
+            prompt_config = {
+                "mode": "advanced",
+                "preset_name": selected_preset_name,
+                "creative_prompt": str(advanced_prompt_text or ""),
+                "simple_settings": preset_simple_settings,
+            }
+
+        current_mode = str(prompt_config.get("mode", "advanced") or "advanced")
+        current_creative_prompt = str(prompt_config.get("creative_prompt", "") or "")
+        current_simple_settings_raw = prompt_config.get("simple_settings", {}) or {}
+        current_simple_settings: dict[str, Any] = (
+            dict(current_simple_settings_raw)
+            if isinstance(current_simple_settings_raw, dict)
+            else {}
+        )
 
         st.markdown("#### Save Preset")
+
         save_col1, save_col2, save_col3 = st.columns([1.2, 1.6, 1])
 
         with save_col1:
@@ -770,22 +846,26 @@ def render_metadata_prompt_builder_ui(prefix: str = "metadata_prompt") -> dict[s
         with save_col3:
             st.write("")
             st.write("")
+
             if st.button("Save as New Preset", key=f"{prefix}_save_new"):
                 try:
                     saved = save_prompt_preset(
-                        name=new_preset_name,
-                        description=new_preset_description,
-                        mode=mode,
-                        creative_prompt=creative_prompt,
-                        simple_settings=simple_settings,
+                        name=str(new_preset_name or ""),
+                        description=str(new_preset_description or ""),
+                        mode=current_mode,
+                        creative_prompt=current_creative_prompt,
+                        simple_settings=current_simple_settings,
                         overwrite=False,
                     )
+
                     st.success(f"Saved prompt preset: {saved['name']}")
                     st.rerun()
+
                 except Exception as e:
                     st.error(f"Could not save preset: {e}")
 
         selected_is_readonly = bool(selected_preset.get("readonly", False))
+
         manage_col1, manage_col2 = st.columns(2)
 
         with manage_col1:
@@ -796,15 +876,19 @@ def render_metadata_prompt_builder_ui(prefix: str = "metadata_prompt") -> dict[s
             ):
                 try:
                     saved = save_prompt_preset(
-                        name=selected_preset_name,
-                        description=new_preset_description or preset_description,
-                        mode=mode,
-                        creative_prompt=creative_prompt,
-                        simple_settings=simple_settings,
+                        name=str(selected_preset_name or ""),
+                        description=str(
+                            new_preset_description or preset_description or ""
+                        ),
+                        mode=current_mode,
+                        creative_prompt=current_creative_prompt,
+                        simple_settings=current_simple_settings,
                         overwrite=True,
                     )
+
                     st.success(f"Updated prompt preset: {saved['name']}")
                     st.rerun()
+
                 except Exception as e:
                     st.error(f"Could not update preset: {e}")
 
@@ -815,21 +899,21 @@ def render_metadata_prompt_builder_ui(prefix: str = "metadata_prompt") -> dict[s
                 disabled=selected_is_readonly,
             ):
                 try:
-                    delete_prompt_preset(selected_preset_name)
+                    delete_prompt_preset(str(selected_preset_name or ""))
+
                     st.success(f"Deleted prompt preset: {selected_preset_name}")
                     st.rerun()
+
                 except Exception as e:
                     st.error(f"Could not delete preset: {e}")
 
         if selected_is_readonly:
-            st.caption("Built-in presets cannot be updated or deleted. Save as a new preset to customize them.")
+            st.caption(
+                "Built-in presets cannot be updated or deleted. "
+                "Save as a new preset to customize them."
+            )
 
-    return {
-        "mode": mode,
-        "preset_name": selected_preset_name,
-        "creative_prompt": creative_prompt,
-        "simple_settings": simple_settings,
-    }
+    return prompt_config
 
 
 def format_size_bytes(num_bytes: int | float | None) -> str:
