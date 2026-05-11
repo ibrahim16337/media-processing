@@ -3,6 +3,7 @@ import shutil
 import zipfile
 import io
 from pathlib import Path
+from typing import Any
 
 import streamlit as st
 
@@ -63,6 +64,13 @@ from app.pipelines.metadata_generation_pipeline.ollama_client import (
 from app.pipelines.metadata_generation_pipeline.transcript_sources import (
     get_excel_sheet_names,
     get_excel_columns,
+)
+from app.pipelines.metadata_generation_pipeline.prompt_presets import (
+    build_simple_prompt_from_settings,
+    delete_prompt_preset,
+    get_prompt_preset,
+    get_prompt_preset_names,
+    save_prompt_preset,
 )
 from app.config.server_upload_config import get_server_upload_config
 from app.pipelines.workflow_pipeline.server_upload_workflows import (
@@ -590,6 +598,240 @@ def load_server_browser_snapshot(remote_path: str | None = None):
         return None
 
 
+def render_metadata_prompt_builder_ui(prefix: str = "metadata_prompt") -> dict[str, object]:
+    presets = {name: get_prompt_preset(name) for name in get_prompt_preset_names()}
+    preset_names = list(presets.keys()) or ["Default SEO Metadata"]
+
+    with st.expander("Prompt Builder", expanded=False):
+        st.caption(
+            "Choose a prompt preset, use simple builder fields, or edit the full advanced prompt. "
+            "The app will still add locked JSON output rules internally so the parser does not break."
+        )
+
+        preset_col, mode_col = st.columns([1.3, 1])
+
+        with preset_col:
+            selected_preset_name = st.selectbox(
+                "Prompt Preset",
+                options=preset_names,
+                key=f"{prefix}_preset_name",
+            )
+
+        selected_preset = get_prompt_preset(selected_preset_name)
+        selected_mode = str(selected_preset.get("mode", "advanced")).lower()
+        default_mode_index = 0 if selected_mode == "simple" else 1
+
+        advanced_text_key = f"{prefix}_advanced_prompt_text"
+        loaded_preset_key = f"{prefix}_loaded_preset"
+
+        if st.session_state.get(loaded_preset_key) != selected_preset_name:
+            st.session_state[advanced_text_key] = str(selected_preset.get("creative_prompt", "") or "")
+            st.session_state[loaded_preset_key] = selected_preset_name
+
+        with mode_col:
+            mode_choice = st.radio(
+                "Prompt Mode",
+                options=["Simple Builder", "Advanced Prompt"],
+                index=default_mode_index,
+                horizontal=True,
+                key=f"{prefix}_mode_choice",
+            )
+
+        preset_description = str(selected_preset.get("description", "") or "").strip()
+        if preset_description:
+            st.info(preset_description)
+
+        preset_simple_settings = selected_preset.get("simple_settings", {}) or {}
+
+        simple_settings: dict[str, object] = {
+            "video_type": "",
+            "platform": "",
+            "language": "",
+            "tone": "",
+            "title_style": "",
+            "description_style": "",
+            "tag_count": 20,
+            "hashtag_count": "3-5",
+            "extra_instructions": "",
+        }
+
+        if mode_choice == "Simple Builder":
+            st.markdown("#### Simple Prompt Builder")
+
+            s_col1, s_col2 = st.columns(2)
+
+            with s_col1:
+                simple_settings["video_type"] = st.text_input(
+                    "Video Type",
+                    value=str(preset_simple_settings.get("video_type", "Islamic educational content")),
+                    key=f"{prefix}_video_type",
+                )
+                simple_settings["platform"] = st.selectbox(
+                    "Platform",
+                    options=["YouTube", "YouTube Shorts / Instagram Reels / Facebook Reels", "Facebook", "Instagram", "Website Archive", "Custom"],
+                    index=0,
+                    key=f"{prefix}_platform",
+                )
+                simple_settings["language"] = st.selectbox(
+                    "Language Style",
+                    options=[
+                        "Roman Urdu title, English description, mixed tags",
+                        "Urdu title and Urdu description",
+                        "English title and English description",
+                        "Mixed: Roman Urdu title/tags and English description",
+                    ],
+                    index=0,
+                    key=f"{prefix}_language",
+                )
+                simple_settings["tone"] = st.text_input(
+                    "Tone",
+                    value=str(preset_simple_settings.get("tone", "Respectful, informative, and SEO-focused")),
+                    key=f"{prefix}_tone",
+                )
+
+            with s_col2:
+                simple_settings["title_style"] = st.text_input(
+                    "Title Style",
+                    value=str(preset_simple_settings.get("title_style", "Topic-first Roman Urdu")),
+                    key=f"{prefix}_title_style",
+                )
+                simple_settings["description_style"] = st.text_input(
+                    "Description Style",
+                    value=str(preset_simple_settings.get("description_style", "Clear English description")),
+                    key=f"{prefix}_description_style",
+                )
+                simple_settings["tag_count"] = int(st.number_input(
+                    "Tag Count",
+                    min_value=5,
+                    max_value=50,
+                    value=int(preset_simple_settings.get("tag_count", 20) or 20),
+                    step=1,
+                    key=f"{prefix}_tag_count",
+                ))
+                simple_settings["hashtag_count"] = st.text_input(
+                    "Hashtag Count",
+                    value=str(preset_simple_settings.get("hashtag_count", "3-5")),
+                    key=f"{prefix}_hashtag_count",
+                )
+
+            simple_settings["extra_instructions"] = st.text_area(
+                "Extra Instructions",
+                value=str(preset_simple_settings.get("extra_instructions", "")),
+                height=120,
+                key=f"{prefix}_extra_instructions",
+            )
+
+            preview_prompt = build_simple_prompt_from_settings(simple_settings)
+
+            with st.expander("Preview Generated Prompt", expanded=False):
+                st.text_area(
+                    "Generated Prompt Preview",
+                    value=preview_prompt,
+                    height=260,
+                    key=f"{prefix}_simple_preview",
+                    disabled=True,
+                )
+
+            creative_prompt = ""
+            mode = "simple"
+
+        else:
+            st.markdown("#### Advanced Prompt")
+            st.caption("Use [text], {transcript}, or {{transcript}} if you want to place the transcript manually. If not used, the transcript will be appended automatically.")
+
+            creative_prompt = st.text_area(
+                "Editable Prompt",
+                value=st.session_state.get(advanced_text_key, ""),
+                height=360,
+                key=advanced_text_key,
+            )
+
+            simple_settings = preset_simple_settings
+            mode = "advanced"
+
+        st.markdown("#### Save Preset")
+        save_col1, save_col2, save_col3 = st.columns([1.2, 1.6, 1])
+
+        with save_col1:
+            new_preset_name = st.text_input(
+                "Preset Name",
+                value="",
+                placeholder="e.g. Dr Israr Short Clips",
+                key=f"{prefix}_save_name",
+            )
+
+        with save_col2:
+            new_preset_description = st.text_input(
+                "Preset Description",
+                value="",
+                key=f"{prefix}_save_description",
+            )
+
+        with save_col3:
+            st.write("")
+            st.write("")
+            if st.button("Save as New Preset", key=f"{prefix}_save_new"):
+                try:
+                    saved = save_prompt_preset(
+                        name=new_preset_name,
+                        description=new_preset_description,
+                        mode=mode,
+                        creative_prompt=creative_prompt,
+                        simple_settings=simple_settings,
+                        overwrite=False,
+                    )
+                    st.success(f"Saved prompt preset: {saved['name']}")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Could not save preset: {e}")
+
+        selected_is_readonly = bool(selected_preset.get("readonly", False))
+        manage_col1, manage_col2 = st.columns(2)
+
+        with manage_col1:
+            if st.button(
+                "Update Selected Preset",
+                key=f"{prefix}_update_selected",
+                disabled=selected_is_readonly,
+            ):
+                try:
+                    saved = save_prompt_preset(
+                        name=selected_preset_name,
+                        description=new_preset_description or preset_description,
+                        mode=mode,
+                        creative_prompt=creative_prompt,
+                        simple_settings=simple_settings,
+                        overwrite=True,
+                    )
+                    st.success(f"Updated prompt preset: {saved['name']}")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Could not update preset: {e}")
+
+        with manage_col2:
+            if st.button(
+                "Delete Selected Preset",
+                key=f"{prefix}_delete_selected",
+                disabled=selected_is_readonly,
+            ):
+                try:
+                    delete_prompt_preset(selected_preset_name)
+                    st.success(f"Deleted prompt preset: {selected_preset_name}")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Could not delete preset: {e}")
+
+        if selected_is_readonly:
+            st.caption("Built-in presets cannot be updated or deleted. Save as a new preset to customize them.")
+
+    return {
+        "mode": mode,
+        "preset_name": selected_preset_name,
+        "creative_prompt": creative_prompt,
+        "simple_settings": simple_settings,
+    }
+
+
 def format_size_bytes(num_bytes: int | float | None) -> str:
     try:
         size = float(num_bytes or 0)
@@ -626,18 +868,33 @@ def render_server_upload_result(upload_result: dict | None):
 
     st.markdown("### Upload Result")
 
+    total = int(upload_result.get("total_files", 0) or 0)
+    uploaded = int(upload_result.get("uploaded_count", 0) or 0)
+    skipped = int(upload_result.get("skipped_count", 0) or 0)
+    failed = int(upload_result.get("failed_count", 0) or 0)
+
+    if failed == 0:
+        st.success(f"Upload completed: {uploaded} uploaded, {skipped} skipped, {failed} failed.")
+    else:
+        st.warning(f"Upload finished with issues: {uploaded} uploaded, {skipped} skipped, {failed} failed.")
+
     metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
     with metric_col1:
-        st.metric("Total", upload_result.get("total_files", 0))
+        st.metric("Total", total)
     with metric_col2:
-        st.metric("Uploaded", upload_result.get("uploaded_count", 0))
+        st.metric("Uploaded", uploaded)
     with metric_col3:
-        st.metric("Skipped", upload_result.get("skipped_count", 0))
+        st.metric("Skipped", skipped)
     with metric_col4:
-        st.metric("Failed", upload_result.get("failed_count", 0))
+        st.metric("Failed", failed)
 
     rows = []
+    public_urls = []
     for item in upload_result.get("results", []) or []:
+        public_url = item.get("public_url", "")
+        if public_url:
+            public_urls.append(public_url)
+
         rows.append(
             {
                 "original_name": item.get("original_name", ""),
@@ -645,13 +902,17 @@ def render_server_upload_result(upload_result: dict | None):
                 "status": item.get("status", ""),
                 "reason": item.get("reason", ""),
                 "remote_path": item.get("remote_path", ""),
-                "public_url": item.get("public_url", ""),
+                "public_url": public_url,
             }
         )
 
-    if rows:
-        st.dataframe(rows, use_container_width=True)
+    if public_urls:
+        with st.expander("Public URLs", expanded=False):
+            for url in public_urls:
+                st.code(url)
 
+    if rows:
+        st.dataframe(rows, use_container_width=True, hide_index=True)
 
 
 # --------------------------------------------------
@@ -1075,6 +1336,10 @@ with metadata_tab:
     )
     metadata_transcription_settings = render_transcription_settings_ui("metadata_runtime")
 
+    st.markdown("### Dynamic Metadata Prompt")
+    st.caption("These prompt settings are used in every Metadata / SEO workflow, including transcript-only and Excel workflows.")
+    metadata_prompt_settings = render_metadata_prompt_builder_ui("metadata_prompt")
+
     m_single, m_batch, m_playlist, m_existing = st.tabs([
         "Single YouTube",
         "Batch Inputs",
@@ -1127,7 +1392,8 @@ with metadata_tab:
                         num_ctx=int(single_num_ctx),
                         num_predict=int(single_num_predict),
                         seed=seed_value,
-                        progress_callback=progress_callback,
+                        prompt_settings=metadata_prompt_settings,
+                            progress_callback=progress_callback,
                         transcription_settings=metadata_transcription_settings,
                     )
 
@@ -1250,6 +1516,7 @@ with metadata_tab:
                             num_ctx=int(batch_num_ctx),
                             num_predict=int(batch_num_predict),
                             seed=seed_value,
+                            prompt_settings=metadata_prompt_settings,
                             progress_callback=progress_callback,
                             transcription_settings=metadata_transcription_settings,
                         )
@@ -1295,6 +1562,7 @@ with metadata_tab:
                             num_ctx=int(batch_num_ctx),
                             num_predict=int(batch_num_predict),
                             seed=seed_value,
+                            prompt_settings=metadata_prompt_settings,
                             progress_callback=progress_callback,
                         )
 
@@ -1378,7 +1646,8 @@ with metadata_tab:
                         num_ctx=int(playlist_num_ctx),
                         num_predict=int(playlist_num_predict),
                         seed=seed_value,
-                        progress_callback=progress_callback,
+                        prompt_settings=metadata_prompt_settings,
+                            progress_callback=progress_callback,
                         transcription_settings=metadata_transcription_settings,
                     )
 
@@ -1618,6 +1887,7 @@ with metadata_tab:
                             num_ctx=int(existing_num_ctx),
                             num_predict=int(existing_num_predict),
                             seed=seed_value,
+                            prompt_settings=metadata_prompt_settings,
                             progress_callback=progress_callback,
                         )
                         st.session_state["metadata_existing_result"] = result
@@ -1637,6 +1907,7 @@ with metadata_tab:
                             num_ctx=int(existing_num_ctx),
                             num_predict=int(existing_num_predict),
                             seed=seed_value,
+                            prompt_settings=metadata_prompt_settings,
                             progress_callback=progress_callback,
                         )
                         st.session_state["metadata_existing_result"] = result
@@ -1659,6 +1930,7 @@ with metadata_tab:
                             num_ctx=int(existing_num_ctx),
                             num_predict=int(existing_num_predict),
                             seed=seed_value,
+                            prompt_settings=metadata_prompt_settings,
                             progress_callback=progress_callback,
                         )
                         st.session_state["metadata_existing_result"] = result

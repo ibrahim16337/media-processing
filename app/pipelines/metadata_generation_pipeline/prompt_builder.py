@@ -13,7 +13,8 @@ DEFAULT_CREATIVE_PROMPT = str(
 ).strip()
 
 
-LOCKED_JSON_OUTPUT_INSTRUCTIONS = """LOCKED OUTPUT RULES:
+LOCKED_JSON_OUTPUT_INSTRUCTIONS = """
+LOCKED OUTPUT RULES:
 These rules are mandatory and must be followed even if the editable prompt says otherwise.
 
 - Output ONLY valid JSON.
@@ -24,7 +25,8 @@ These rules are mandatory and must be followed even if the editable prompt says 
 - Do not return arrays or nested objects.
 - The final response must match this structure exactly:
 
-{"title":"...","description":"...","tags":"tag1, tag2, tag3","hashtags":"#Tag #Tag #Tag"}"""
+{"title":"...","description":"...","tags":"tag1, tag2, tag3","hashtags":"#Tag #Tag #Tag"}
+""".strip()
 
 
 def _safe_string(value: Any) -> str:
@@ -34,18 +36,15 @@ def _safe_string(value: Any) -> str:
 
 
 def _replace_transcript_placeholder(prompt: str, transcript_text: str) -> str:
-    if "[text]" in prompt:
-        return prompt.replace("[text]", transcript_text)
+    if "{{text}}" in prompt:
+        return prompt.replace("{{text}}", transcript_text)
 
     if "{{transcript}}" in prompt:
         return prompt.replace("{{transcript}}", transcript_text)
 
-    if "{transcript}" in prompt:
-        return prompt.replace("{transcript}", transcript_text)
-
     return f"""{prompt}
 
-TRANSCRIPT:
+Transcript:
 <transcript>
 {transcript_text}
 </transcript>"""
@@ -56,6 +55,13 @@ def build_metadata_prompt(
     creative_prompt: str | None = None,
     prompt_settings: dict[str, Any] | None = None,
 ) -> str:
+    """
+    Build the final prompt for metadata generation.
+
+    The user-editable prompt controls the creative/SEO style.
+    The locked JSON output instructions are always appended so the parser can
+    reliably parse the LLM response.
+    """
     transcript_text = transcript_text or ""
     prompt_settings = prompt_settings or {}
 
